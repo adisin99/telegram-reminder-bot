@@ -111,6 +111,8 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     try:
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+        print("⏰ Checking reminders at:", now)
+
         records = gsheet.sheet.get_all_records()
 
         for i, row in enumerate(records, start=2):
@@ -120,6 +122,8 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
             reminder_time = f"{row['date']} {row['time']}"
 
+            print("Comparing:", reminder_time, "vs", now)
+
             if reminder_time == now:
 
                 user_id = row["user_id"]
@@ -127,15 +131,15 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
                 msg = row["message"]
                 repeat = row["repeat"]
 
-                text = f"⏰ *{title}*\n{msg}"
+                text = f"⏰ {title}\n{msg}"
+
+                print("Sending reminder to:", user_id)
 
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=text,
-                    parse_mode="Markdown"
+                    text=text
                 )
 
-                # One-time reminder
                 if repeat == "none":
                     gsheet.sheet.update_cell(i, 8, "done")
 
@@ -164,10 +168,11 @@ def main():
 
     # Scheduler (runs every minute)
     app.job_queue.run_repeating(
-        check_reminders,
-        interval=60,
-        first=10
+    check_reminders,
+    interval=60,
+    first=0
     )
+
 
     print("✅ Bot is running...")
 
@@ -176,3 +181,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
