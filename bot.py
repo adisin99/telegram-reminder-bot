@@ -1,5 +1,8 @@
-import pytz
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from telegram.ext import CallbackQueryHandler
+
+import pytz
 from datetime import timezone, timedelta
 
 import logging
@@ -31,43 +34,57 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
+#==============MENU=====================
+def main_menu():
+    keyboard = [
+        [InlineKeyboardButton("➕ Add Reminder", callback_data="add")],
+        [InlineKeyboardButton("📋 My Reminders", callback_data="list")],
+        [InlineKeyboardButton("❓ Help", callback_data="help")]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
 
 # ============== COMMANDS =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
-        "👋 Welcome to Reminder Bot!\n\n"
-        "Use /add to add reminder\n"
-        "Use /list to see reminders\n\n"
-        "Format:\n"
-        "Title | Message | YYYY-MM-DD | HH:MM | none/daily/weekly/monthly"
+        "👋 Welcome to Reminder Bot!\n\nChoose an option:",
+        reply_markup=main_menu()
     )
 
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Send reminder like this:\n\n"
-        "Title | Message | 2026-02-15 | 18:30 | none"
-    )
+    query = update.callback_query
+    await query.answer()
 
+    data = query.data
 
-async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if data == "add":
 
-    try:
-        parts = update.message.text.split("|")
+        context.user_data["step"] = "title"
 
-        if len(parts) != 5:
-            raise ValueError
+        await query.message.reply_text(
+            "✍️ Send reminder title:"
+        )
 
-        title = parts[0].strip()
-        msg = parts[1].strip()
-        date = parts[2].strip()
-        time = parts[3].strip()
-        repeat = parts[4].strip().lower()
+    elif data == "list":
+
+        await list_rem(query, context)
+
+    elif data == "help":
+            elif data.startswith("rep_"):
+
+        repeat = data.replace("rep_", "")
+
+        title = context.user_data["title"]
+        msg = context.user_data["message"]
+        date = context.user_data["date"]
+        time = context.user_data["time"]
 
         row = [
             "",
-            update.effective_user.id,
+            query.from_user.id,
             title,
             msg,
             date,
@@ -78,15 +95,86 @@ async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         gsheet.add_reminder(row)
 
-        await update.message.reply_text("✅ Reminder saved!")
+        context.user_data.clear()
 
-    except:
-        await update.message.reply_text(
-            "❌ Wrong format.\n\n"
-            "Use:\n"
-            "Title | Message | YYYY-MM-DD | HH:MM | none"
+        await query.message.reply_text(
+            "✅ Reminder saved!",
+            reply_markup=main_menu()
         )
 
+
+        await query.message.reply_text(
+            "ℹ️ How to use:\n\n"
+            "➕ Add: Create reminder\n"
+            "📋 My Reminders: View reminders\n\n"
+            "Bot works 24/7 ⏰"
+        )
+
+async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Send reminder like this:\n\n"
+        "Title | Message | 2026-02-15 | 18:30 | none"
+    )
+
+
+async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    step = context.user_data.get("step")
+
+    if not step:
+        return
+
+    text = update.message.text
+
+    # STEP 1: TITLE
+    if step == "title":
+
+        context.user_data["title"] = text
+        context.user_data["step"] = "message"
+
+        await update.message.reply_text("📝 Send reminder message:")
+
+    # STEP 2: MESSAGE
+    elif step == "message":
+
+        context.user_data["message"] = text
+        context.user_data["step"] = "date"
+
+        await update.message.reply_text(
+            "📅 Send date (YYYY-MM-DD):"
+        )
+
+    # STEP 3: DATE
+    elif step == "date":
+
+        context.user_data["date"] = text
+        context.user_data["step"] = "time"
+
+        await update.message.reply_text(
+            "⏰ Send time (HH:MM 24hr):"
+        )
+
+    # STEP 4: TIME
+    elif step == "time":
+
+        context.user_data["time"] = text
+        context.user_data["step"] = "repeat"
+
+        keyboard = [
+            [
+                InlineKeyboardButton("One Time", callback_data="rep_none"),
+                InlineKeyboardButton("Daily", callback_data="rep_daily")
+            ],
+            [
+                InlineKeyboardButton("Weekly", callback_data="rep_weekly"),
+                InlineKeyboardButton("Monthly", callback_data="rep_monthly")
+            ]
+        ]
+
+        await update.message.reply_text(
+            "🔁 Choose repeat:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 async def list_rem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -172,6 +260,7 @@ def main():
 
     # Text handler (for saving)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
     # Scheduler (runs every minute)
     app.job_queue.run_repeating(
@@ -188,6 +277,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
