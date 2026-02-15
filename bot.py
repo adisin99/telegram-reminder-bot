@@ -1,50 +1,83 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-from telegram.ext import CallbackQueryHandler
-
-import pytz
-from datetime import timezone, timedelta
-
 import logging
+import os
+import json
 from datetime import datetime
 
-from telegram import Update
+import pytz
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
     JobQueue,
 )
 
-import gsheet
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 
 # ================= CONFIG =================
 
 TOKEN = "8464632180:AAGh_semPGrVtKBcMFVDy5EvIAl9bzTwcVs"
 
+IST = pytz.timezone("Asia/Kolkata")
+
 # =========================================
 
 
-# Logging (shows status in CMD)
+# =============== LOGGING =================
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
-#==============MENU=====================
+
+# ============= GOOGLE SHEET ==============
+
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
+
+creds_json = os.environ.get("GOOGLE_CREDS")
+
+if not creds_json:
+    raise Exception("GOOGLE_CREDS not set in Railway Variables")
+
+creds_dict = json.loads(creds_json)
+
+creds = ServiceAccountCredentials.from_json_keyfile_dict(
+    creds_dict, scope
+)
+
+client = gspread.authorize(creds)
+
+sheet = client.open("Telegram_Reminders_DB").sheet1
+
+
+# ============= UI MENU ===================
+
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Add Reminder", callback_data="add")],
         [InlineKeyboardButton("📋 My Reminders", callback_data="list")],
-        [InlineKeyboardButton("❓ Help", callback_data="help")]
+        [InlineKeyboardButton("❓ Help", callback_data="help")],
     ]
 
     return InlineKeyboardMarkup(keyboard)
 
-# ============== COMMANDS =================
+
+# ============= COMMANDS ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -53,6 +86,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu()
     )
 
+
+# ============= BUTTON HANDLER ============
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
@@ -60,27 +96,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
+
+    # ADD FLOW
     if data == "add":
 
+        context.user_data.clear()
         context.user_data["step"] = "title"
 
         await query.message.reply_text(
             "✍️ Send reminder title:"
         )
 
+
+    # LIST
     elif data == "list":
 
-        await list_rem(query, context)
+        await list_reminders(query, context)
 
+
+    # HELP
     elif data == "help":
-            elif data.startswith("rep_"):
+
+        await query.message.reply_text(
+            "ℹ️ How to use:\n\n"
+            "➕ Add → Create reminder\n"
+            "📋 My Reminders → View reminders\n\n"
+            "Bot works 24/7 ⏰",
+            reply_markup=main_menu()
+        )
+
+
+    # REPEAT SELECT
+    elif data.startswith("rep_"):
 
         repeat = data.replace("rep_", "")
 
-        title = context.user_data["title"]
-        msg = context.user_data["message"]
-        date = context.user_data["date"]
-        time = context.user_data["time"]
+        title = context.user_data.get("title")
+        msg = context.user_data.get("message")
+        date = context.user_data.get("date")
+        time = context.user_data.get("time")
 
         row = [
             "",
@@ -93,7 +147,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "active"
         ]
 
-        gsheet.add_reminder(row)
+        sheet.append_row(row)
 
         context.user_data.clear()
 
@@ -103,38 +157,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-        await query.message.reply_text(
-            "ℹ️ How to use:\n\n"
-            "➕ Add: Create reminder\n"
-            "📋 My Reminders: View reminders\n\n"
-            "Bot works 24/7 ⏰"
-        )
+# ============= TEXT HANDLER ==============
 
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Send reminder like this:\n\n"
-        "Title | Message | 2026-02-15 | 18:30 | none"
-    )
-
-
-async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     step = context.user_data.get("step")
 
     if not step:
         return
 
-    text = update.message.text
 
-    # STEP 1: TITLE
+    text = update.message.text.strip()
+
+
+    # STEP 1
     if step == "title":
 
         context.user_data["title"] = text
         context.user_data["step"] = "message"
 
-        await update.message.reply_text("📝 Send reminder message:")
+        await update.message.reply_text(
+            "📝 Send reminder message:"
+        )
 
-    # STEP 2: MESSAGE
+
+    # STEP 2
     elif step == "message":
 
         context.user_data["message"] = text
@@ -144,7 +191,8 @@ async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📅 Send date (YYYY-MM-DD):"
         )
 
-    # STEP 3: DATE
+
+    # STEP 3
     elif step == "date":
 
         context.user_data["date"] = text
@@ -154,7 +202,8 @@ async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏰ Send time (HH:MM 24hr):"
         )
 
-    # STEP 4: TIME
+
+    # STEP 4
     elif step == "time":
 
         context.user_data["time"] = text
@@ -163,11 +212,11 @@ async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
                 InlineKeyboardButton("One Time", callback_data="rep_none"),
-                InlineKeyboardButton("Daily", callback_data="rep_daily")
+                InlineKeyboardButton("Daily", callback_data="rep_daily"),
             ],
             [
                 InlineKeyboardButton("Weekly", callback_data="rep_weekly"),
-                InlineKeyboardButton("Monthly", callback_data="rep_monthly")
+                InlineKeyboardButton("Monthly", callback_data="rep_monthly"),
             ]
         ]
 
@@ -176,39 +225,55 @@ async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-async def list_rem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    reminders = gsheet.get_reminders(update.effective_user.id)
+# ============= LIST REMINDERS ============
 
-    if not reminders:
-        await update.message.reply_text("No reminders found.")
+async def list_reminders(query, context):
+
+    records = sheet.get_all_records()
+
+    user_id = query.from_user.id
+
+    user_rows = [
+        r for r in records if str(r["user_id"]) == str(user_id)
+    ]
+
+    if not user_rows:
+        await query.message.reply_text(
+            "No reminders found.",
+            reply_markup=main_menu()
+        )
         return
+
 
     msg = "📋 Your Reminders:\n\n"
 
-    for i, r in enumerate(reminders, 1):
+    for i, r in enumerate(user_rows, 1):
+
         msg += (
             f"{i}. {r['title']}\n"
             f"📅 {r['date']} ⏰ {r['time']}\n"
             f"🔁 {r['repeat']}\n\n"
         )
 
-    await update.message.reply_text(msg)
+
+    await query.message.reply_text(
+        msg,
+        reply_markup=main_menu()
+    )
 
 
-# ============== SCHEDULER =================
+# ============= SCHEDULER =================
 
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
     try:
-        ist = pytz.timezone("Asia/Kolkata")
-        now = datetime.now(ist).strftime("%Y-%m-%d %H:%M")
 
+        now = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
 
+        print("⏰ Checking at:", now)
 
-        print("⏰ Checking reminders at:", now)
-
-        records = gsheet.sheet.get_all_records()
+        records = sheet.get_all_records()
 
         for i, row in enumerate(records, start=2):
 
@@ -216,8 +281,6 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             reminder_time = f"{row['date']} {row['time']}"
-
-            print("Comparing:", reminder_time, "vs", now)
 
             if reminder_time == now:
 
@@ -228,21 +291,20 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
                 text = f"⏰ {title}\n{msg}"
 
-                print("Sending reminder to:", user_id)
-
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=text
                 )
 
+                # One time
                 if repeat == "none":
-                    gsheet.sheet.update_cell(i, 8, "done")
+                    sheet.update_cell(i, 8, "done")
 
     except Exception as e:
         print("Reminder Error:", e)
 
 
-# ============== MAIN ======================
+# ============= MAIN ======================
 
 def main():
 
@@ -253,20 +315,24 @@ def main():
         .build()
     )
 
+
     # Commands
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("list", list_rem))
 
-    # Text handler (for saving)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save))
+    # Buttons
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Scheduler (runs every minute)
+    # Text input
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, save_text)
+    )
+
+
+    # Scheduler
     app.job_queue.run_repeating(
-    check_reminders,
-    interval=60,
-    first=0
+        check_reminders,
+        interval=60,
+        first=0
     )
 
 
@@ -275,9 +341,7 @@ def main():
     app.run_polling()
 
 
+# =======================================
+
 if __name__ == "__main__":
     main()
-
-
-
-
