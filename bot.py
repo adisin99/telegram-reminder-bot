@@ -29,6 +29,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 TOKEN = "8464632180:AAGh_semPGrVtKBcMFVDy5EvIAl9bzTwcVs"
 
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs/edit?pli=1&gid=0#gid=0"
+
 IST = pytz.timezone("Asia/Kolkata")
 
 # =========================================
@@ -62,14 +64,13 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(
 
 client = gspread.authorize(creds)
 
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs/edit?pli=1&gid=0#gid=0"
-
 sheet = client.open_by_url(SHEET_URL).sheet1
 
 
 # ============= UI MENU ===================
 
 def main_menu():
+
     keyboard = [
         [InlineKeyboardButton("➕ Add Reminder", callback_data="add")],
         [InlineKeyboardButton("📋 My Reminders", callback_data="list")],
@@ -79,7 +80,7 @@ def main_menu():
     return InlineKeyboardMarkup(keyboard)
 
 
-# ============= COMMANDS ==================
+# ============= START =====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -105,9 +106,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["step"] = "title"
 
-        await query.message.reply_text(
-            "✍️ Send reminder title:"
-        )
+        await query.message.reply_text("✍️ Send reminder title:")
 
 
     # LIST
@@ -120,15 +119,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "help":
 
         await query.message.reply_text(
-            "ℹ️ How to use:\n\n"
-            "➕ Add → Create reminder\n"
-            "📋 My Reminders → View reminders\n\n"
-            "Bot works 24/7 ⏰",
+            "ℹ️ Use buttons to manage reminders.",
             reply_markup=main_menu()
         )
 
 
-    # REPEAT SELECT
+    # SAVE REPEAT
     elif data.startswith("rep_"):
 
         repeat = data.replace("rep_", "")
@@ -157,7 +153,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Reminder saved!",
             reply_markup=main_menu()
         )
-#Delete
+
+
+    # DELETE
     elif data.startswith("del_"):
 
         row_num = int(data.replace("del_", ""))
@@ -169,7 +167,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu()
         )
 
-#Skip
+
+    # SKIP ONCE
     elif data.startswith("skip_"):
 
         row_num = int(data.replace("skip_", ""))
@@ -181,6 +180,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu()
         )
 
+
 # ============= TEXT HANDLER ==============
 
 async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,44 +190,33 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not step:
         return
 
-
     text = update.message.text.strip()
 
 
-    # STEP 1
     if step == "title":
 
         context.user_data["title"] = text
         context.user_data["step"] = "message"
 
-        await update.message.reply_text(
-            "📝 Send reminder message:"
-        )
+        await update.message.reply_text("📝 Send message:")
 
 
-    # STEP 2
     elif step == "message":
 
         context.user_data["message"] = text
         context.user_data["step"] = "date"
 
-        await update.message.reply_text(
-            "📅 Send date (YYYY-MM-DD):"
-        )
+        await update.message.reply_text("📅 Send date (YYYY-MM-DD):")
 
 
-    # STEP 3
     elif step == "date":
 
         context.user_data["date"] = text
         context.user_data["step"] = "time"
 
-        await update.message.reply_text(
-            "⏰ Send time (HH:MM 24hr):"
-        )
+        await update.message.reply_text("⏰ Send time (HH:MM):")
 
 
-    # STEP 4
     elif step == "time":
 
         context.user_data["time"] = text
@@ -250,34 +239,35 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ============= LIST REMINDERS ============
+# ============= LIST ======================
 
 async def list_reminders(query, context):
 
     records = sheet.get_all_records()
+
     user_id = query.from_user.id
 
-    user_rows = []
+    rows = []
 
-    # Collect active reminders with row index
     for idx, r in enumerate(records, start=2):
 
         if (
             str(r["user_id"]) == str(user_id)
             and r["status"] == "active"
         ):
-            user_rows.append((idx, r))
+            rows.append((idx, r))
 
 
-    if not user_rows:
+    if not rows:
+
         await query.message.reply_text(
-            "No active reminders found.",
+            "No active reminders.",
             reply_markup=main_menu()
         )
         return
 
 
-    for count, (row_num, r) in enumerate(user_rows, 1):
+    for count, (row_num, r) in enumerate(rows, 1):
 
         text = (
             f"{count}. {r['title']}\n"
@@ -318,25 +308,23 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
         now = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
 
-        print("⏰ Checking at:", now)
-
         records = sheet.get_all_records()
 
         for i, row in enumerate(records, start=2):
 
-        status = row["status"]
-
-# Skip once
-        if status == "skip":
-
-    # Reset back to active
-            sheet.update_cell(i, 8, "active")
-            continue
+            status = row["status"]
 
 
-# Ignore inactive
-        if status != "active":
-            continue
+            # Skip once
+            if status == "skip":
+
+                sheet.update_cell(i, 8, "active")
+                continue
+
+
+            # Ignore inactive
+            if status != "active":
+                continue
 
 
             reminder_time = f"{row['date']} {row['time']}"
@@ -355,11 +343,13 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
                     text=text
                 )
 
-                # One time
+
                 if repeat == "none":
                     sheet.update_cell(i, 8, "done")
 
+
     except Exception as e:
+
         print("Reminder Error:", e)
 
 
@@ -375,19 +365,15 @@ def main():
     )
 
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
 
-    # Buttons
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Text input
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, save_text)
     )
 
 
-    # Scheduler
     app.job_queue.run_repeating(
         check_reminders,
         interval=60,
@@ -404,6 +390,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
