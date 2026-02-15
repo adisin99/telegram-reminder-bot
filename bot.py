@@ -124,10 +124,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     def cancel_retry(row):
 
-        job = pending_retries.pop(row, None)
+        state = pending_retries.pop(row, None)
 
-        if job:
-            job.schedule_removal()
+        if state and "job" in state:
+
+            state["job"].schedule_removal()
+
 
 
     # ADD
@@ -338,26 +340,34 @@ async def auto_retry(context):
 
     row = data["row"]
     chat = data["chat"]
-    count = data["count"]
 
 
+    # If cancelled
     if row not in pending_retries:
         return
 
 
-    r = sheet.row_values(row)
-
-    if not r or r[7] != "active":
-        return
+    state = pending_retries[row]
+    count = state["count"]
 
 
+    # Max reached
     if count >= DEFAULT_MAX_RETRIES:
 
         pending_retries.pop(row, None)
         return
 
 
+    r = sheet.row_values(row)
+
+    if not r or r[7] != "active":
+
+        pending_retries.pop(row, None)
+        return
+
+
     text = f"🔔 Still pending...\n\n📌 {r[2]}\n📝 {r[3]}"
+
 
     await context.bot.send_message(
         chat_id=chat,
@@ -366,17 +376,21 @@ async def auto_retry(context):
     )
 
 
+    # Schedule next retry
     job = context.job_queue.run_once(
         auto_retry,
         DEFAULT_RETRY_INTERVAL,
         data={
             "row": row,
-            "chat": chat,
-            "count": count + 1
+            "chat": chat
         }
     )
 
-    pending_retries[row] = job
+
+    pending_retries[row] = {
+        "job": job,
+        "count": count + 1
+    }
 
 
 # ============= SCHEDULER =================
@@ -415,12 +429,15 @@ async def check_reminders(context):
             DEFAULT_RETRY_INTERVAL,
             data={
                 "row": i,
-                "chat": uid,
-                "count": 1
-            }
-        )
+                "chat": uid
+        }
+    )
 
-        pending_retries[i] = job
+        pending_retries[i] = {
+            "job": job,
+            "count": 1
+    }
+
 
 
         # Repeat logic
@@ -492,3 +509,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
