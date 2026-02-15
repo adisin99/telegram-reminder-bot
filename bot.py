@@ -62,7 +62,9 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(
 
 client = gspread.authorize(creds)
 
-sheet = client.open("Telegram_Reminders_DB").sheet1
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs/edit?pli=1&gid=0#gid=0"
+
+sheet = client.open_by_url(SHEET_URL).sheet1
 
 
 # ============= UI MENU ===================
@@ -345,3 +347,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
