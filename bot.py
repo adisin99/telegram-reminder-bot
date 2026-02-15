@@ -324,19 +324,19 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
         for i, row in enumerate(records, start=2):
 
-            status = row["status"]
+        status = row["status"]
 
-# Skip one-time skip
+# Skip once
         if status == "skip":
 
     # Reset back to active
-        sheet.update_cell(i, 8, "active")
-        continue
+            sheet.update_cell(i, 8, "active")
+            continue
 
 
-# Ignore deleted/done
+# Ignore inactive
         if status != "active":
-        continue
+            continue
 
 
             reminder_time = f"{row['date']} {row['time']}"
@@ -404,5 +404,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
