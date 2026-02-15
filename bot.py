@@ -157,7 +157,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Reminder saved!",
             reply_markup=main_menu()
         )
+#Delete
+    elif data.startswith("del_"):
 
+        row_num = int(data.replace("del_", ""))
+
+        sheet.update_cell(row_num, 8, "deleted")
+
+        await query.message.reply_text(
+            "🗑 Reminder deleted.",
+            reply_markup=main_menu()
+        )
+
+#Skip
+    elif data.startswith("skip_"):
+
+        row_num = int(data.replace("skip_", ""))
+
+        sheet.update_cell(row_num, 8, "skip")
+
+        await query.message.reply_text(
+            "⏭ Next reminder skipped.",
+            reply_markup=main_menu()
+        )
 
 # ============= TEXT HANDLER ==============
 
@@ -233,34 +255,57 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_reminders(query, context):
 
     records = sheet.get_all_records()
-
     user_id = query.from_user.id
 
-    user_rows = [
-        r for r in records if str(r["user_id"]) == str(user_id)
-    ]
+    user_rows = []
+
+    # Collect active reminders with row index
+    for idx, r in enumerate(records, start=2):
+
+        if (
+            str(r["user_id"]) == str(user_id)
+            and r["status"] == "active"
+        ):
+            user_rows.append((idx, r))
+
 
     if not user_rows:
         await query.message.reply_text(
-            "No reminders found.",
+            "No active reminders found.",
             reply_markup=main_menu()
         )
         return
 
 
-    msg = "📋 Your Reminders:\n\n"
+    for count, (row_num, r) in enumerate(user_rows, 1):
 
-    for i, r in enumerate(user_rows, 1):
-
-        msg += (
-            f"{i}. {r['title']}\n"
+        text = (
+            f"{count}. {r['title']}\n"
             f"📅 {r['date']} ⏰ {r['time']}\n"
-            f"🔁 {r['repeat']}\n\n"
+            f"🔁 {r['repeat']}"
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🗑 Delete",
+                    callback_data=f"del_{row_num}"
+                ),
+                InlineKeyboardButton(
+                    "⏭ Skip Once",
+                    callback_data=f"skip_{row_num}"
+                )
+            ]
+        ]
+
+        await query.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
 
     await query.message.reply_text(
-        msg,
+        "⬅️ Back to menu",
         reply_markup=main_menu()
     )
 
@@ -279,8 +324,20 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
         for i, row in enumerate(records, start=2):
 
-            if row["status"] != "active":
-                continue
+            status = row["status"]
+
+# Skip one-time skip
+        if status == "skip":
+
+    # Reset back to active
+        sheet.update_cell(i, 8, "active")
+        continue
+
+
+# Ignore deleted/done
+        if status != "active":
+        continue
+
 
             reminder_time = f"{row['date']} {row['time']}"
 
@@ -347,4 +404,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
