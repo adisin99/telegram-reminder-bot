@@ -32,7 +32,6 @@ SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9S
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# Smart Retry (Config-ready)
 DEFAULT_RETRY_INTERVAL = 600   # 10 min
 DEFAULT_MAX_RETRIES = 3
 
@@ -45,11 +44,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-
-
-# ============= RETRY TRACKER =============
-
-pending_retries = {}
 
 
 # ============= GOOGLE SHEET ==============
@@ -122,16 +116,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
 
-    def cancel_retry(row):
-
-        state = pending_retries.pop(row, None)
-
-        if state and "job" in state:
-
-            state["job"].schedule_removal()
-
-
-
     # ADD
     if data == "add":
 
@@ -169,7 +153,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["date"],
             context.user_data["time"],
             repeat,
-            "active"
+            "active",
+            0
         ]
 
         sheet.append_row(row)
@@ -182,14 +167,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-    # SNOOZE 1 HOUR
+    # SNOOZE
     elif data.startswith("snooze_"):
 
         row = int(data.replace("snooze_", ""))
 
-        cancel_retry(row)
-
         snooze(row, 60)
+
+        sheet.update_cell(row, 9, 0)
 
         await query.message.reply_text(
             "🕐 Snoozed 1 hour",
@@ -202,9 +187,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         row = int(data.replace("done_", ""))
 
-        cancel_retry(row)
-
         sheet.update_cell(row, 8, "done")
+        sheet.update_cell(row, 9, 0)
 
         await query.message.reply_text(
             "✅ Done",
@@ -342,31 +326,31 @@ async def auto_retry(context):
     chat = data["chat"]
 
 
-    # If cancelled
-    if row not in pending_retries:
-        return
-
-
-    state = pending_retries[row]
-    count = state["count"]
-
-
-    # Max reached
-    if count >= DEFAULT_MAX_RETRIES:
-
-        pending_retries.pop(row, None)
-        return
-
-
     r = sheet.row_values(row)
 
-    if not r or r[7] != "active":
-
-        pending_retries.pop(row, None)
+    if not r:
         return
 
 
-    text = f"🔔 Still pending...\n\n📌 {r[2]}\n📝 {r[3]}"
+    if r[7] != "active":
+        return
+
+
+    try:
+        count = int(r[8])
+    except:
+        count = 0
+
+
+    if count >= DEFAULT_MAX_RETRIES:
+        return
+
+
+    title = r[2]
+    msg = r[3]
+
+
+    text = f"🔔 Still pending...\n\n📌 {title}\n📝 {msg}"
 
 
     await context.bot.send_message(
@@ -376,8 +360,10 @@ async def auto_retry(context):
     )
 
 
-    # Schedule next retry
-    job = context.job_queue.run_once(
+    sheet.update_cell(row, 9, count + 1)
+
+
+    context.job_queue.run_once(
         auto_retry,
         DEFAULT_RETRY_INTERVAL,
         data={
@@ -385,12 +371,6 @@ async def auto_retry(context):
             "chat": chat
         }
     )
-
-
-    pending_retries[row] = {
-        "job": job,
-        "count": count + 1
-    }
 
 
 # ============= SCHEDULER =================
@@ -423,24 +403,19 @@ async def check_reminders(context):
         )
 
 
-        # Start retry loop
-        job = context.job_queue.run_once(
+        sheet.update_cell(i, 9, 0)
+
+
+        context.job_queue.run_once(
             auto_retry,
             DEFAULT_RETRY_INTERVAL,
             data={
                 "row": i,
                 "chat": uid
-        }
-    )
-
-        pending_retries[i] = {
-            "job": job,
-            "count": 1
-    }
+            }
+        )
 
 
-
-        # Repeat logic
         if r["repeat"] == "none":
 
             sheet.update_cell(i, 8, "done")
@@ -509,4 +484,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
