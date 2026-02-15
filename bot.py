@@ -1,3 +1,5 @@
+import pytz
+
 from datetime import timezone, timedelta
 
 import logging
@@ -111,8 +113,9 @@ async def list_rem(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
     try:
-        IST = timezone(timedelta(hours=5, minutes=30))
-        now = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+        ist = pytz.timezone("Asia/Kolkata")
+        now = datetime.now(ist).strftime("%Y-%m-%d %H:%M")
+
 
 
         print("⏰ Checking reminders at:", now)
@@ -185,5 +188,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
