@@ -1,313 +1,513 @@
+import logging
 import os
 import json
-import logging
 from datetime import datetime, timedelta
 
 import pytz
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
+    JobQueue,
 )
+
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 
 # ================= CONFIG =================
 
-TOKEN = os.getenv("BOT_TOKEN")
-CREDS = os.getenv("GOOGLE_CREDS")
+TOKEN = "8464632180:AAGh_semPGrVtKBcMFVDy5EvIAl9bzTwcVs"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs/edit?pli=1&gid=0#gid=0"
 
 IST = pytz.timezone("Asia/Kolkata")
 
-MAX_RETRY = 3
-RETRY_GAP = 600       # 10 min
-SNOOZE_1H = 3600      # 1 hour
+DEFAULT_RETRY_INTERVAL = 600   # 10 min
+DEFAULT_MAX_RETRIES = 3
+
+# =========================================
 
 
-# ================= LOG ====================
+# =============== LOGGING =================
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 
 
-# ================= GOOGLE SHEET ===========
-
-if not CREDS:
-    raise Exception("GSHEET_CREDS missing")
+# ============= GOOGLE SHEET ==============
 
 scope = [
     "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/drive",
 ]
 
-creds_dict = json.loads(CREDS)
+creds_json = os.environ.get("GOOGLE_CREDS")
 
-creds = ServiceAccountCredentials.from_json_keyfile_dict(
-    creds_dict, scope
+if not creds_json:
+    raise Exception("GOOGLE_CREDS missing")
+
+creds = json.loads(creds_json)
+
+credentials = ServiceAccountCredentials.from_json_keyfile_dict(
+    creds, scope
 )
 
-client = gspread.authorize(creds)
+client = gspread.authorize(credentials)
 
-# 👉 Use sheet ID (recommended)
-sheet = client.open_by_key("1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs").sheet1
-
-
-# ================= HELPERS ================
-
-def now():
-    return datetime.now(IST)
+sheet = client.open_by_url(SHEET_URL).sheet1
 
 
-def buttons(rid):
+# ============= HELPERS ===================
+
+def retry_job_name(row):
+    return f"retry_{row}"
+
+
+def cancel_retry(job_queue, row):
+
+    name = retry_job_name(row)
+
+    jobs = job_queue.get_jobs_by_name(name)
+
+    for j in jobs:
+        j.schedule_removal()
+
+
+# ============= UI ========================
+
+def main_menu():
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Reminder", callback_data="add")],
+        [InlineKeyboardButton("📋 My Reminders", callback_data="list")],
+        [InlineKeyboardButton("❓ Help", callback_data="help")],
+    ])
+
+
+def reminder_buttons(row):
 
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🕐 Remind in 1 Hour",
-                callback_data=f"snooze_{rid}"
+                callback_data=f"snooze_{row}"
             ),
             InlineKeyboardButton(
                 "✅ Done",
-                callback_data=f"done_{rid}"
-            ),
+                callback_data=f"done_{row}"
+            )
         ]
     ])
 
 
-def rows():
-    return sheet.get_all_records()
-
-
-# ================= COMMANDS ===============
+# ============= START =====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "👋 Smart Reminder Bot\n\n"
-        "/add → Add reminder\n"
-        "/list → View reminders"
+        "👋 Smart Reminder Bot\n\nChoose:",
+        reply_markup=main_menu()
     )
 
 
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============= BUTTON HANDLER ============
 
-    await update.message.reply_text(
-        "Format:\n\n"
-        "Title | Message | YYYY-MM-DD | HH:MM | repeat\n\n"
-        "repeat = none/daily/weekly/monthly"
-    )
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    query = update.callback_query
+    await query.answer()
 
-async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if "|" not in update.message.text:
-        return
-
-    try:
-        t, m, d, tm, r = [x.strip() for x in update.message.text.split("|")]
-
-        uid = update.message.chat_id
-
-        sheet.append_row([
-            uid, t, d, tm, m, r, "",
-            "active",  # status
-            0          # retry
-        ])
-
-        await update.message.reply_text("✅ Saved")
-
-    except:
-        await update.message.reply_text("❌ Wrong format")
+    data = query.data
 
 
-async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ADD
+    if data == "add":
 
-    uid = str(update.message.chat_id)
+        context.user_data.clear()
+        context.user_data["step"] = "title"
 
-    txt = "📋 Your Reminders\n\n"
-
-    found = False
-
-    for i, r in enumerate(rows(), start=2):
-
-        if str(r["user_id"]) == uid:
-
-            found = True
-
-            txt += f"{i-1}. {r['title']} | {r['date']} {r['time']} | {r['status']}\n"
-
-    if not found:
-        txt = "No reminders"
-
-    await update.message.reply_text(txt)
+        await query.message.reply_text("✍️ Title:")
 
 
-# ================= BUTTONS ================
+    # LIST
+    elif data == "list":
 
-async def buttons_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await list_reminders(query)
 
-    q = update.callback_query
-    await q.answer()
 
-    data = q.data
-    rid = int(data.split("_")[1])
+    # HELP
+    elif data == "help":
 
-    row = rid + 1
+        await query.message.reply_text(
+            "Use buttons to manage reminders.",
+            reply_markup=main_menu()
+        )
+
+
+    # SAVE
+    elif data.startswith("rep_"):
+
+        repeat = data.replace("rep_", "")
+
+        row = [
+            "",
+            query.from_user.id,
+            context.user_data["title"],
+            context.user_data["message"],
+            context.user_data["date"],
+            context.user_data["time"],
+            repeat,
+            "active",
+            0
+        ]
+
+        sheet.append_row(row)
+
+        context.user_data.clear()
+
+        await query.message.reply_text(
+            "✅ Saved",
+            reply_markup=main_menu()
+        )
+
+
+    # SNOOZE 1 HOUR
+    elif data.startswith("snooze_"):
+
+        row = int(data.replace("snooze_", ""))
+
+        # cancel old retries
+        cancel_retry(context.job_queue, row)
+
+        # move time
+        snooze(row, 60)
+
+        # reset retry count
+        sheet.update_cell(row, 9, 0)
+        sheet.update_cell(row, 8, "active")
+
+        await query.message.reply_text(
+            "🕐 Snoozed for 1 hour",
+            reply_markup=main_menu()
+        )
 
 
     # DONE
-    if data.startswith("done_"):
+    elif data.startswith("done_"):
+
+        row = int(data.replace("done_", ""))
+
+        cancel_retry(context.job_queue, row)
 
         sheet.update_cell(row, 8, "done")
         sheet.update_cell(row, 9, 0)
 
-        await q.message.reply_text("✅ Done")
+        await query.message.reply_text(
+            "✅ Marked Done",
+            reply_markup=main_menu()
+        )
 
 
-    # SNOOZE
-    elif data.startswith("snooze_"):
+# ============= TEXT HANDLER ==============
 
-        t = now() + timedelta(seconds=SNOOZE_1H)
+async def save_text(update, context):
 
-        sheet.update_cell(row, 3, t.strftime("%Y-%m-%d"))
-        sheet.update_cell(row, 4, t.strftime("%H:%M"))
+    step = context.user_data.get("step")
 
-        sheet.update_cell(row, 8, "active")
-        sheet.update_cell(row, 9, 0)
-
-        await q.message.reply_text("⏰ Snoozed 1 hour")
-
-
-# ================= RETRY ==================
-
-async def retry_job(ctx: ContextTypes.DEFAULT_TYPE):
-
-    row_id = ctx.job.data
-
-    r = sheet.row_values(row_id)
-
-    if len(r) < 9:
+    if not step:
         return
 
-    if r[7] != "active":
-        return
-
-    count = int(r[8])
-
-    if count >= MAX_RETRY:
-        return
+    text = update.message.text.strip()
 
 
-    await ctx.bot.send_message(
-        r[0],
-        f"⏰ Reminder (Retry)\n\n{r[1]}\n{r[4]}",
-        reply_markup=buttons(row_id - 2)
-    )
+    if step == "title":
 
-    sheet.update_cell(row_id, 9, count + 1)
+        context.user_data["title"] = text
+        context.user_data["step"] = "message"
+
+        await update.message.reply_text("📝 Message:")
 
 
-# ================= MAIN CHECK =============
+    elif step == "message":
 
-async def check(ctx: ContextTypes.DEFAULT_TYPE):
+        context.user_data["message"] = text
+        context.user_data["step"] = "date"
 
-    now_t = now()
+        await update.message.reply_text("📅 Date YYYY-MM-DD:")
 
-    for i, r in enumerate(rows(), start=2):
+
+    elif step == "date":
+
+        context.user_data["date"] = text
+        context.user_data["step"] = "time"
+
+        await update.message.reply_text("⏰ Time HH:MM:")
+
+
+    elif step == "time":
+
+        context.user_data["time"] = text
+        context.user_data["step"] = "repeat"
+
+        await update.message.reply_text(
+            "Repeat?",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("One", callback_data="rep_none"),
+                    InlineKeyboardButton("Daily", callback_data="rep_daily"),
+                ],
+                [
+                    InlineKeyboardButton("Weekly", callback_data="rep_weekly"),
+                    InlineKeyboardButton("Monthly", callback_data="rep_monthly"),
+                ]
+            ])
+        )
+
+
+# ============= LIST ======================
+
+async def list_reminders(query):
+
+    rows = sheet.get_all_records()
+
+    uid = query.from_user.id
+
+    found = False
+
+
+    for i, r in enumerate(rows, start=2):
+
+        if str(r["user_id"]) != str(uid):
+            continue
 
         if r["status"] != "active":
             continue
 
-        try:
-            rt = datetime.strptime(
-                f"{r['date']} {r['time']}",
-                "%Y-%m-%d %H:%M"
-            ).replace(tzinfo=IST)
+        found = True
 
-        except:
-            continue
+        txt = (
+            f"📌 {r['title']}\n"
+            f"📅 {r['date']} ⏰ {r['time']}\n"
+            f"🔁 {r['repeat']}"
+        )
 
-
-        if now_t >= rt:
-
-            await ctx.bot.send_message(
-                r["user_id"],
-                f"⏰ Reminder\n\n{r['title']}\n{r['message']}",
-                reply_markup=buttons(i - 2)
-            )
-
-
-            # reset retry
-            sheet.update_cell(i, 9, 0)
+        await query.message.reply_text(
+            txt,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🕐 1h", callback_data=f"snooze_{i}"),
+                    InlineKeyboardButton("✅ Done", callback_data=f"done_{i}")
+                ]
+            ])
+        )
 
 
-            # schedule retry
-            ctx.job_queue.run_once(
-                retry_job,
-                RETRY_GAP,
-                data=i
-            )
+    if not found:
+
+        await query.message.reply_text(
+            "No reminders.",
+            reply_markup=main_menu()
+        )
 
 
-            # repeat logic
-            if r["repeat"] == "none":
+# ============= SNOOZE ====================
 
-                sheet.update_cell(i, 8, "done")
+def snooze(row, mins):
 
+    r = sheet.row_values(row)
 
-            elif r["repeat"] == "daily":
+    dt = datetime.strptime(
+        f"{r[4]} {r[5]}",
+        "%Y-%m-%d %H:%M"
+    )
 
-                n = rt + timedelta(days=1)
-                sheet.update_cell(i, 3, n.strftime("%Y-%m-%d"))
+    new = dt + timedelta(minutes=mins)
 
-
-            elif r["repeat"] == "weekly":
-
-                n = rt + timedelta(days=7)
-                sheet.update_cell(i, 3, n.strftime("%Y-%m-%d"))
-
-
-            elif r["repeat"] == "monthly":
-
-                n = rt + timedelta(days=30)
-                sheet.update_cell(i, 3, n.strftime("%Y-%m-%d"))
+    sheet.update_cell(row, 5, new.strftime("%Y-%m-%d"))
+    sheet.update_cell(row, 6, new.strftime("%H:%M"))
+    sheet.update_cell(row, 8, "active")
 
 
-# ================= MAIN ===================
+# ============= AUTO RETRY ================
 
-def main():
+async def auto_retry(context):
 
-    if not TOKEN:
-        raise Exception("BOT_TOKEN missing")
+    data = context.job.data
+
+    row = data["row"]
+    chat = data["chat"]
 
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    r = sheet.row_values(row)
+
+    if not r:
+        return
 
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("list", list_cmd))
+    if r[7] != "active":
+        return
 
-    app.add_handler(CallbackQueryHandler(buttons_cb))
 
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, save)
+    try:
+        count = int(r[8])
+    except:
+        count = 0
+
+
+    if count >= DEFAULT_MAX_RETRIES:
+        return
+
+
+    title = r[2]
+    msg = r[3]
+
+
+    text = f"🔔 Still pending...\n\n📌 {title}\n📝 {msg}"
+
+
+    await context.bot.send_message(
+        chat_id=chat,
+        text=text,
+        reply_markup=reminder_buttons(row)
     )
 
 
-    # check every minute
-    app.job_queue.run_repeating(check, 60)
+    sheet.update_cell(row, 9, count + 1)
+
+
+    context.job_queue.run_once(
+        auto_retry,
+        DEFAULT_RETRY_INTERVAL,
+        data={
+            "row": row,
+            "chat": chat
+        },
+        name=retry_job_name(row)
+    )
+
+
+# ============= SCHEDULER =================
+
+async def check_reminders(context):
+
+    now = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+
+    rows = sheet.get_all_records()
+
+
+    for i, r in enumerate(rows, start=2):
+
+        if r["status"] != "active":
+            continue
+
+
+        if f"{r['date']} {r['time']}" != now:
+            continue
+
+
+        uid = r["user_id"]
+
+        text = f"⏰ {r['title']}\n{r['message']}"
+
+        await context.bot.send_message(
+            chat_id=uid,
+            text=text,
+            reply_markup=reminder_buttons(i)
+        )
+
+
+        sheet.update_cell(i, 9, 0)
+
+
+        # start retry cycle
+        context.job_queue.run_once(
+            auto_retry,
+            DEFAULT_RETRY_INTERVAL,
+            data={
+                "row": i,
+                "chat": uid
+            },
+            name=retry_job_name(i)
+        )
+
+
+        if r["repeat"] == "none":
+
+            sheet.update_cell(i, 8, "done")
+
+        else:
+
+            d = datetime.strptime(r["date"], "%Y-%m-%d")
+
+            if r["repeat"] == "daily":
+                nd = d + timedelta(days=1)
+
+            elif r["repeat"] == "weekly":
+                nd = d + timedelta(days=7)
+
+            elif r["repeat"] == "monthly":
+
+                m = d.month + 1
+                y = d.year
+
+                if m > 12:
+                    m = 1
+                    y += 1
+
+                nd = d.replace(year=y, month=m)
+
+
+            sheet.update_cell(
+                i, 5, nd.strftime("%Y-%m-%d")
+            )
+
+
+# ============= MAIN ======================
+
+def main():
+
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .job_queue(JobQueue())
+        .build()
+    )
+
+
+    app.add_handler(CommandHandler("start", start))
+
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, save_text)
+    )
+
+
+    app.job_queue.run_repeating(
+        check_reminders,
+        interval=60,
+        first=0
+    )
 
 
     print("🚀 Smart Reminder Bot Running")
 
     app.run_polling()
 
+
+# =======================================
 
 if __name__ == "__main__":
     main()
