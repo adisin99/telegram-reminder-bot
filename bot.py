@@ -168,32 +168,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     # SNOOZE
-    elif data.startswith("snooze_"):
+elif data.startswith("snooze_"):
 
-        row = int(data.replace("snooze_", ""))
+    row = int(data.replace("snooze_", ""))
 
-        snooze(row, 60)
+    snooze(row, 60)
 
-        sheet.update_cell(row, 9, 0)
+    # Mark as paused
+    sheet.update_cell(row, 8, "snoozed")
+    sheet.update_cell(row, 9, 0)
 
-        await query.message.reply_text(
-            "🕐 Snoozed 1 hour",
-            reply_markup=main_menu()
-        )
+    await query.message.reply_text(
+        "🕐 Snoozed 1 hour",
+        reply_markup=main_menu()
+    )
 
 
     # DONE
-    elif data.startswith("done_"):
+elif data.startswith("done_"):
 
-        row = int(data.replace("done_", ""))
+    row = int(data.replace("done_", ""))
 
-        sheet.update_cell(row, 8, "done")
-        sheet.update_cell(row, 9, 0)
+    sheet.update_cell(row, 8, "done")
+    sheet.update_cell(row, 9, 0)
 
-        await query.message.reply_text(
-            "✅ Done",
-            reply_markup=main_menu()
-        )
+    await query.message.reply_text(
+        "✅ Done",
+        reply_markup=main_menu()
+    )
+
 
 
 # ============= TEXT HANDLER ==============
@@ -332,7 +335,10 @@ async def auto_retry(context):
         return
 
 
-    if r[7] != "active":
+    status = r[7]
+
+    # Only retry if active
+    if status != "active":
         return
 
 
@@ -360,9 +366,11 @@ async def auto_retry(context):
     )
 
 
+    # Update counter
     sheet.update_cell(row, 9, count + 1)
 
 
+    # Schedule next retry
     context.job_queue.run_once(
         auto_retry,
         DEFAULT_RETRY_INTERVAL,
@@ -384,8 +392,10 @@ async def check_reminders(context):
 
     for i, r in enumerate(rows, start=2):
 
-        if r["status"] != "active":
-            continue
+# Allow active OR snoozed (when time reached)
+    if r["status"] not in ["active", "snoozed"]:
+        continue
+
 
 
         rem_time = datetime.strptime(
@@ -409,8 +419,8 @@ async def check_reminders(context):
             text=text,
             reply_markup=reminder_buttons(i)
         )
-
-
+        # Activate retry cycle
+        sheet.update_cell(i, 8, "active")
         sheet.update_cell(i, 9, 0)
 
 
@@ -492,4 +502,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
