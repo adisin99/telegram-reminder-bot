@@ -116,7 +116,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
 
-    # ADD
     if data == "add":
 
         context.user_data.clear()
@@ -125,13 +124,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("✍️ Title:")
 
 
-    # LIST
     elif data == "list":
 
         await list_reminders(query)
 
 
-    # HELP
     elif data == "help":
 
         await query.message.reply_text(
@@ -140,7 +137,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-    # SAVE
     elif data.startswith("rep_"):
 
         repeat = data.replace("rep_", "")
@@ -167,35 +163,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-    # SNOOZE
-elif data.startswith("snooze_"):
+    elif data.startswith("snooze_"):
 
-    row = int(data.replace("snooze_", ""))
+        row = int(data.replace("snooze_", ""))
 
-    snooze(row, 60)
+        snooze(row, 60)
 
-    # Mark as paused
-    sheet.update_cell(row, 8, "snoozed")
-    sheet.update_cell(row, 9, 0)
+        sheet.update_cell(row, 8, "snoozed")
+        sheet.update_cell(row, 9, 0)
 
-    await query.message.reply_text(
-        "🕐 Snoozed 1 hour",
-        reply_markup=main_menu()
-    )
+        await query.message.reply_text(
+            "🕐 Snoozed 1 hour",
+            reply_markup=main_menu()
+        )
 
 
-    # DONE
-elif data.startswith("done_"):
+    elif data.startswith("done_"):
 
-    row = int(data.replace("done_", ""))
+        row = int(data.replace("done_", ""))
 
-    sheet.update_cell(row, 8, "done")
-    sheet.update_cell(row, 9, 0)
+        sheet.update_cell(row, 8, "done")
+        sheet.update_cell(row, 9, 0)
 
-    await query.message.reply_text(
-        "✅ Done",
-        reply_markup=main_menu()
-    )
+        await query.message.reply_text(
+            "✅ Done",
+            reply_markup=main_menu()
+        )
+
 
 
 
@@ -502,5 +496,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
