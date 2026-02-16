@@ -49,7 +49,7 @@ scope = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-creds_json = os.getenv("GSHEET_CREDS")
+creds_json = os.getenv("GOOGLE_CREDS")
 
 creds_dict = json.loads(creds_json)
 
@@ -357,3 +357,4 @@ async def main():
 if __name__ == "__main__":
 
     asyncio.run(main())
+
