@@ -356,6 +356,35 @@ async def main():
 
 if __name__ == "__main__":
 
-    asyncio.run(main())
+    def main():
+
+        app = ApplicationBuilder().token(TOKEN).build()
+
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("add", add))
+        app.add_handler(CommandHandler("list", list_cmd))
+
+        app.add_handler(CallbackQueryHandler(button_handler))
+        app.add_handler(CommandHandler("text", save_reminder))
+
+
+        scheduler = AsyncIOScheduler()
+        scheduler.start()
+
+        scheduler.add_job(
+            lambda: asyncio.create_task(check_reminders(app)),
+            "interval",
+            minutes=1,
+        )
+
+        print("🚀 Smart Reminder Bot Running")
+
+        app.run_polling()
+
+
+    if __name__ == "__main__":
+        main()
+
+
 
 
