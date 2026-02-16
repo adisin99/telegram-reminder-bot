@@ -388,7 +388,15 @@ async def check_reminders(context):
             continue
 
 
-        if f"{r['date']} {r['time']}" != now:
+        rem_time = datetime.strptime(
+            f"{r['date']} {r['time']}",
+            "%Y-%m-%d %H:%M"
+        ).replace(tzinfo=IST)
+
+        now_dt = datetime.now(IST)
+
+        # Skip if not yet time
+        if rem_time > now_dt:
             continue
 
 
@@ -484,3 +492,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
