@@ -384,48 +384,54 @@ async def check_reminders(context):
     rows = sheet.get_all_records()
 
 
-    for i, r in enumerate(rows, start=2):
+for i, r in enumerate(rows, start=2):
 
-# Allow active OR snoozed (when time reached)
+    # Only active or snoozed reminders
     if r["status"] not in ["active", "snoozed"]:
         continue
 
 
-
+    try:
         rem_time = datetime.strptime(
             f"{r['date']} {r['time']}",
             "%Y-%m-%d %H:%M"
         ).replace(tzinfo=IST)
 
-        now_dt = datetime.now(IST)
-
-        # Skip if not yet time
-        if rem_time > now_dt:
-            continue
+    except:
+        print(f"⚠️ Invalid date/time in row {i}")
+        continue
 
 
-        uid = r["user_id"]
+    now_dt = datetime.now(IST)
 
-        text = f"⏰ {r['title']}\n{r['message']}"
-
-        await context.bot.send_message(
-            chat_id=uid,
-            text=text,
-            reply_markup=reminder_buttons(i)
-        )
-        # Activate retry cycle
-        sheet.update_cell(i, 8, "active")
-        sheet.update_cell(i, 9, 0)
+    # Not yet time
+    if rem_time > now_dt:
+        continue
 
 
-        context.job_queue.run_once(
-            auto_retry,
-            DEFAULT_RETRY_INTERVAL,
-            data={
-                "row": i,
-                "chat": uid
-            }
-        )
+    # Send reminder
+    await context.bot.send_message(
+        chat_id=r["user_id"],
+        text=f"⏰ {r['title']}\n\n{r['message']}",
+        reply_markup=reminder_buttons(i)
+    )
+
+
+    # Activate retry cycle
+    sheet.update_cell(i, 8, "active")
+    sheet.update_cell(i, 9, 0)
+
+
+    # Schedule auto retry
+    context.job_queue.run_once(
+        auto_retry,
+        DEFAULT_RETRY_INTERVAL,
+        data={
+            "row": i,
+            "chat": r["user_id"]
+        }
+    )
+
 
 
         if r["repeat"] == "none":
@@ -496,6 +502,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
