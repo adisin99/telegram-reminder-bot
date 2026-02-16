@@ -25,7 +25,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ================== CONFIG ==================
 
-TOKEN = os.getenv("8464632180:AAGh_semPGrVtKBcMFVDy5EvIAl9bzTwcVs")
+TOKEN = os.getenv("BOT_TOKEN")
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -357,4 +357,5 @@ async def main():
 if __name__ == "__main__":
 
     asyncio.run(main())
+
 
