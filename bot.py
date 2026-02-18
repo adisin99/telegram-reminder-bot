@@ -50,7 +50,7 @@ logging.basicConfig(
 
 scope = [
     "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/drive",
+    "https://www.googleapis.com/auth/drive",
 ]
 
 creds_json = os.environ.get("GOOGLE_CREDS")
@@ -67,22 +67,6 @@ credentials = ServiceAccountCredentials.from_json_keyfile_dict(
 client = gspread.authorize(credentials)
 
 sheet = client.open_by_url(SHEET_URL).sheet1
-
-
-# ============= HELPERS ===================
-
-def retry_job_name(row):
-    return f"retry_{row}"
-
-
-def cancel_retry(job_queue, row):
-
-    name = retry_job_name(row)
-
-    jobs = job_queue.get_jobs_by_name(name)
-
-    for j in jobs:
-        j.schedule_removal()
 
 
 # ============= UI ========================
@@ -183,23 +167,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-    # SNOOZE 1 HOUR
+    # SNOOZE
     elif data.startswith("snooze_"):
 
         row = int(data.replace("snooze_", ""))
 
-        # cancel old retries
-        cancel_retry(context.job_queue, row)
-
-        # move time
         snooze(row, 60)
 
-        # reset retry count
         sheet.update_cell(row, 9, 0)
-        sheet.update_cell(row, 8, "active")
 
         await query.message.reply_text(
-            "🕐 Snoozed for 1 hour",
+            "🕐 Snoozed 1 hour",
             reply_markup=main_menu()
         )
 
@@ -209,13 +187,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         row = int(data.replace("done_", ""))
 
-        cancel_retry(context.job_queue, row)
-
         sheet.update_cell(row, 8, "done")
         sheet.update_cell(row, 9, 0)
 
         await query.message.reply_text(
-            "✅ Marked Done",
+            "✅ Done",
             reply_markup=main_menu()
         )
 
@@ -393,8 +369,7 @@ async def auto_retry(context):
         data={
             "row": row,
             "chat": chat
-        },
-        name=retry_job_name(row)
+        }
     )
 
 
@@ -431,15 +406,13 @@ async def check_reminders(context):
         sheet.update_cell(i, 9, 0)
 
 
-        # start retry cycle
         context.job_queue.run_once(
             auto_retry,
             DEFAULT_RETRY_INTERVAL,
             data={
                 "row": i,
                 "chat": uid
-            },
-            name=retry_job_name(i)
+            }
         )
 
 
