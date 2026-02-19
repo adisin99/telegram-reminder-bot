@@ -125,27 +125,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("✅ Saved", reply_markup=main_menu())
 
     # CLEAN SNOOZE - 1hr single notification
+# SNOOZE - REPLACE ENTIRE BLOCK
     elif data.startswith("snooze_"):
         row = int(data.replace("snooze_", ""))
-        
-        # Cancel ALL alarm jobs for this row
-        jobs = context.job_queue.get_jobs_by_name(f"alarm-{row}")
-        for job in jobs:
+    
+         # Cancel pending retries
+        current_jobs = context.job_queue.get_jobs_by_name(f"retry-{row}")
+        for job in current_jobs:
             job.schedule_removal()
-        
+
         snooze(row, 60)
-        
-        # Schedule SINGLE notification (no retry chain)
-        r = sheet.row_values(row)
-        alarm_time = IST.localize(datetime.strptime(f"{r[4]} {r[5]}", "%Y-%m-%d %H:%M"))
-        context.job_queue.run_once(
-            alarm_notification,
-            when=alarm_time,
-            data={"row": row, "uid": query.from_user.id},
-            job_kwargs={"name": f"alarm-{row}"}
+        sheet.update_cell(row, 9, 0)  # reset retries
+    
+        # FORCE IMMEDIATE NOTIFICATION + RETRY CHAIN
+        uid = query.from_user.id
+        await context.bot.send_message(
+            chat_id=uid,
+            text=f"🕐 Snoozed 1 hour!\n\n{r[2]}\n{r[3]}",  # title + msg
+            reply_markup=reminder_buttons(row)
         )
-        
+    
+        # Start retry chain
+        context.job_queue.run_once(
+            auto_retry,
+            DEFAULT_RETRY_INTERVAL,
+            data={"row": row, "chat": uid},
+            job_kwargs={"name": f"retry-{row}"}
+        )
+    
         await query.message.reply_text("🕐 Snoozed 1 hour", reply_markup=main_menu())
+
 
     # CLEAN DONE
     elif data.startswith("done_"):
@@ -213,15 +222,14 @@ async def list_reminders(query):
         await query.message.reply_text("No reminders.", reply_markup=main_menu())
 
 # ============= SNOOZE HELPER ==============
-def snooze(row, minutes):
+def snooze(row, mins):
     r = sheet.row_values(row)
     dt = datetime.strptime(f"{r[4]} {r[5]}", "%Y-%m-%d %H:%M")
-    new_dt = IST.localize(dt) + timedelta(minutes=minutes)
+    new = IST.localize(dt) + timedelta(minutes=mins)  # IST aware
     
-    sheet.update_cell(row, 5, new_dt.strftime("%Y-%m-%d"))
-    sheet.update_cell(row, 6, new_dt.strftime("%H:%M"))
+    sheet.update_cell(row, 5, new.strftime("%Y-%m-%d"))
+    sheet.update_cell(row, 6, new.strftime("%H:%M"))
     sheet.update_cell(row, 8, "active")
-    sheet.update_cell(row, 9, 0)
 
 # ============= MAIN ALARM LOGIC ================
 async def alarm_notification(context: ContextTypes.DEFAULT_TYPE):
@@ -311,13 +319,19 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_text))
     
-    app.job_queue.run_repeating(check_reminders, interval=30, first=0)
+    app.job_queue.run_repeating(
+        check_reminders,
+        interval=30,  # 30s not 60s
+        first=0
+    )
+
     
     print("🚀 Smart Reminder Bot Running ✅")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+
 
 
 
