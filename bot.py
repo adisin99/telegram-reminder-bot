@@ -156,47 +156,47 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # SNOOZE
-elif data.startswith("snooze_"):
-    row = int(data.replace("snooze_", ""))
+    elif data.startswith("snooze_"):
+        row = int(data.replace("snooze_", ""))
     
     # Cancel priors
-    current_jobs = context.job_queue.get_jobs_by_name(f"notify-{row}")
-    for job in current_jobs:
-        job.schedule_removal()
+        current_jobs = context.job_queue.get_jobs_by_name(f"notify-{row}")
+        for job in current_jobs:
+            job.schedule_removal()
     
-    snooze(row, 60)  # or 10 for testing
+        snooze(row, 60)  # or 10 for testing
     
-    # Schedule direct notification
-    r = sheet.row_values(row)
-    dt = IST.localize(datetime.strptime(f"{r[4]} {r[5]}", "%Y-%m-%d %H:%M"))
-    context.job_queue.run_once(
-        send_notification,
-        when=dt,
-        data={"row": row, "chat": query.from_user.id},
-        job_kwargs={"name": f"notify-{row}"}
-    )
+        # Schedule direct notification
+        r = sheet.row_values(row)
+        dt = IST.localize(datetime.strptime(f"{r[4]} {r[5]}", "%Y-%m-%d %H:%M"))
+        context.job_queue.run_once(
+            send_notification,
+            when=dt,
+            data={"row": row, "chat": query.from_user.id},
+            job_kwargs={"name": f"notify-{row}"}
+        )
     
-    await query.message.reply_text(
-        f"🕐 Snoozed {60 if mins==60 else 10} min",
-        reply_markup=main_menu()
-    )
+        await query.message.reply_text(
+            f"🕐 Snoozed {60 if mins==60 else 10} min",
+            reply_markup=main_menu()
+        )
 
-# DONE - unchanged, but add cancel
-elif data.startswith("done_"):
-    row = int(data.replace("done_", ""))
+    # DONE - unchanged, but add cancel
+    elif data.startswith("done_"):
+        row = int(data.replace("done_", ""))
     
-    # Cancel pending jobs
-    current_jobs = context.job_queue.get_jobs_by_name(f"notify-{row}")
-    for job in current_jobs:
-        job.schedule_removal()
+        # Cancel pending jobs
+        current_jobs = context.job_queue.get_jobs_by_name(f"notify-{row}")
+        for job in current_jobs:
+            job.schedule_removal()
     
-    sheet.update_cell(row, 8, "done")
-    sheet.update_cell(row, 9, 0)
+        sheet.update_cell(row, 8, "done")
+        sheet.update_cell(row, 9, 0)
     
-    await query.message.reply_text(
-        "✅ Done",
-        reply_markup=main_menu()
-    )
+        await query.message.reply_text(
+            "✅ Done",
+            reply_markup=main_menu()
+        )
 
 # ============= TEXT HANDLER ==============
 
@@ -492,5 +492,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
