@@ -156,41 +156,47 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # SNOOZE
-    elif data.startswith("snooze_"):
+elif data.startswith("snooze_"):
+    row = int(data.replace("snooze_", ""))
+    
+    # Cancel priors
+    current_jobs = context.job_queue.get_jobs_by_name(f"notify-{row}")
+    for job in current_jobs:
+        job.schedule_removal()
+    
+    snooze(row, 60)  # or 10 for testing
+    
+    # Schedule direct notification
+    r = sheet.row_values(row)
+    dt = IST.localize(datetime.strptime(f"{r[4]} {r[5]}", "%Y-%m-%d %H:%M"))
+    context.job_queue.run_once(
+        send_notification,
+        when=dt,
+        data={"row": row, "chat": query.from_user.id},
+        job_kwargs={"name": f"notify-{row}"}
+    )
+    
+    await query.message.reply_text(
+        f"🕐 Snoozed {60 if mins==60 else 10} min",
+        reply_markup=main_menu()
+    )
 
-        row = int(data.replace("snooze_", ""))
-
-        # Cancel any pending retries
-        current_jobs = context.job_queue.get_jobs_by_name(f"retry-{row}")
-        for job in current_jobs:
-            job.schedule_removal()
-
-        snooze(row, 60)
-
-        sheet.update_cell(row, 9, 0)
-
-        await query.message.reply_text(
-            "🕐 Snoozed 1 hour",
-            reply_markup=main_menu()
-        )
-
-    # DONE
-    elif data.startswith("done_"):
-
-        row = int(data.replace("done_", ""))
-
-        # Cancel any pending retries
-        current_jobs = context.job_queue.get_jobs_by_name(f"retry-{row}")
-        for job in current_jobs:
-            job.schedule_removal()
-
-        sheet.update_cell(row, 8, "done")
-        sheet.update_cell(row, 9, 0)
-
-        await query.message.reply_text(
-            "✅ Done",
-            reply_markup=main_menu()
-        )
+# DONE - unchanged, but add cancel
+elif data.startswith("done_"):
+    row = int(data.replace("done_", ""))
+    
+    # Cancel pending jobs
+    current_jobs = context.job_queue.get_jobs_by_name(f"notify-{row}")
+    for job in current_jobs:
+        job.schedule_removal()
+    
+    sheet.update_cell(row, 8, "done")
+    sheet.update_cell(row, 9, 0)
+    
+    await query.message.reply_text(
+        "✅ Done",
+        reply_markup=main_menu()
+    )
 
 # ============= TEXT HANDLER ==============
 
@@ -289,19 +295,63 @@ async def list_reminders(query):
 # ============= SNOOZE ====================
 
 def snooze(row, mins):
-
     r = sheet.row_values(row)
+    
+    dt = datetime.strptime(f"{r[4]} {r[5]}", "%Y-%m-%d %H:%M")
+    new_dt = IST.localize(dt) + timedelta(minutes=mins)  # IST-aware
+    
+    sheet.update_cell(row, 5, new_dt.strftime("%Y-%m-%d"))
+    sheet.update_cell(row, 6, new_dt.strftime("%H:%M"))
+    sheet.update_cell(row, 8, "active")  # status
+    sheet.update_cell(row, 9, 0)  # retries
 
-    dt = datetime.strptime(
-        f"{r[4]} {r[5]}",
-        "%Y-%m-%d %H:%M"
+# ============= SEND NOTIFICATION ================
+async def send_notification(context: ContextTypes.DEFAULT_TYPE):
+    """Sends notification at exact scheduled time"""
+    data = context.job.data
+    row = data["row"]
+    chat = data["chat"]
+    
+    # Self-remove after run
+    context.job.schedule_removal()
+    
+    r = sheet.row_values(row)
+    if not r or r[7] != "active":  # col 8 status (0-index 7)
+        return
+    
+    title = r[2]
+    msg = r[3]
+    
+    text = f"🔔 Reminder!\n\n📌 {title}\n📝 {msg}"
+    
+    await context.bot.send_message(
+        chat_id=chat,
+        text=text,
+        reply_markup=reminder_buttons(row)
     )
 
-    new = dt + timedelta(minutes=mins)
-
-    sheet.update_cell(row, 5, new.strftime("%Y-%m-%d"))
-    sheet.update_cell(row, 6, new.strftime("%H:%M"))
-    sheet.update_cell(row, 8, "active")
+async def send_notification_immediate(context: ContextTypes.DEFAULT_TYPE, row: int, chat_id: int):
+    """Send NOW + schedule 10min retry"""
+    r = sheet.row_values(row)
+    title = r[2]
+    msg = r[3]
+    
+    text = f"⏰ {title}\n{msg}"
+    
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=reminder_buttons(row)
+    )
+    
+    # Schedule 10min retry
+    retry_time = datetime.now(IST) + timedelta(minutes=10)
+    context.job_queue.run_once(
+        send_notification,
+        when=retry_time,
+        data={"row": row, "chat": chat_id},
+        job_kwargs={"name": f"notify-{row}"}
+    )
 
 # ============= AUTO RETRY ================
 
@@ -363,50 +413,34 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now_str = now.strftime("%Y-%m-%d %H:%M")
     
     rows = sheet.get_all_records()
-
+    
     for i, r in enumerate(rows, start=2):
         if r["status"] != "active":
             continue
-
+            
         rem_str = f"{r['date']} {r['time']}"
-        if rem_str != now_str:  # Still exact for display, but add window below
+        if rem_str != now_str:
             continue
-
-        # Fuzzy: confirm within ±30s (handles seconds mismatch)
+            
+        # Fuzzy match ±30 seconds
         try:
             rem_dt = IST.localize(datetime.strptime(rem_str, "%Y-%m-%d %H:%M"))
-            delta = abs((now - rem_dt).total_seconds())
-            if delta > 30:
+            if abs((now - rem_dt).total_seconds()) > 30:
                 continue
-        except:
+        except ValueError:
             continue
-
+            
         uid = r["user_id"]
-
-        # Cancel any prior retries (safety)
-        current_jobs = context.job_queue.get_jobs_by_name(f"retry-{i}")
+        
+        # Cancel any prior jobs
+        current_jobs = context.job_queue.get_jobs_by_name(f"notify-{i}")
         for job in current_jobs:
             job.schedule_removal()
-
-        text = f"⏰ {r['title']}\n{r['message']}"
-        await context.bot.send_message(
-            chat_id=uid,
-            text=text,
-            reply_markup=reminder_buttons(i)
-        )
-
-        sheet.update_cell(i, 9, 0)
-
-        context.job_queue.run_once(
-            auto_retry,
-            DEFAULT_RETRY_INTERVAL,
-            data={
-                "row": i,
-                "chat": uid
-            },
-            job_kwargs={"name": f"retry-{i}"}
-        )
-
+        
+        # Send immediate + retry chain starts
+        await send_notification_immediate(context, i, uid)
+        
+        # Handle repeats
         if r["repeat"] == "none":
             sheet.update_cell(i, 8, "done")
         else:
@@ -422,10 +456,9 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
                     m = 1
                     y += 1
                 nd = d.replace(year=y, month=m)
-
-            sheet.update_cell(
-                i, 5, nd.strftime("%Y-%m-%d")
-            )
+            sheet.update_cell(i, 5, nd.strftime("%Y-%m-%d"))
+        
+        sheet.update_cell(i, 9, 0)  # reset retries
 # ============= MAIN ======================
 
 def main():
@@ -459,4 +492,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
