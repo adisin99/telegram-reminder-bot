@@ -359,23 +359,36 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
 # ============= SCHEDULER =================
 
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
-
-    now = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
-
+    now = datetime.now(IST)
+    now_str = now.strftime("%Y-%m-%d %H:%M")
+    
     rows = sheet.get_all_records()
 
     for i, r in enumerate(rows, start=2):
-
         if r["status"] != "active":
             continue
 
-        if f"{r['date']} {r['time']}" != now:
+        rem_str = f"{r['date']} {r['time']}"
+        if rem_str != now_str:  # Still exact for display, but add window below
+            continue
+
+        # Fuzzy: confirm within ±30s (handles seconds mismatch)
+        try:
+            rem_dt = IST.localize(datetime.strptime(rem_str, "%Y-%m-%d %H:%M"))
+            delta = abs((now - rem_dt).total_seconds())
+            if delta > 30:
+                continue
+        except:
             continue
 
         uid = r["user_id"]
 
-        text = f"⏰ {r['title']}\n{r['message']}"
+        # Cancel any prior retries (safety)
+        current_jobs = context.job_queue.get_jobs_by_name(f"retry-{i}")
+        for job in current_jobs:
+            job.schedule_removal()
 
+        text = f"⏰ {r['title']}\n{r['message']}"
         await context.bot.send_message(
             chat_id=uid,
             text=text,
@@ -395,32 +408,24 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
         )
 
         if r["repeat"] == "none":
-
             sheet.update_cell(i, 8, "done")
-
         else:
-
             d = datetime.strptime(r["date"], "%Y-%m-%d")
-
             if r["repeat"] == "daily":
                 nd = d + timedelta(days=1)
             elif r["repeat"] == "weekly":
                 nd = d + timedelta(days=7)
             elif r["repeat"] == "monthly":
-
                 m = d.month + 1
                 y = d.year
-
                 if m > 12:
                     m = 1
                     y += 1
-
                 nd = d.replace(year=y, month=m)
 
             sheet.update_cell(
                 i, 5, nd.strftime("%Y-%m-%d")
             )
-
 # ============= MAIN ======================
 
 def main():
@@ -454,3 +459,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
