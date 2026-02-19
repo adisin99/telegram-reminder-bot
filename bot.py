@@ -76,6 +76,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu()
     )
 
+# ============= TEST ALARM (ADD HERE) ================
+async def test_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force test alarm RIGHT NOW - /test command"""
+    rows = sheet.get_all_records()
+    for i, r in enumerate(rows, start=2):
+        if r.get("status") == "active":
+            uid = int(r["user_id"])
+            context.job_queue.run_once(
+                alarm_notification,
+                datetime.now(IST) + timedelta(seconds=2),
+                data={"row": i, "uid": uid},
+                job_kwargs={"name": f"alarm-{i}"}
+            )
+            await update.message.reply_text(f"🧪 TEST alarm for row {i} in 2s!")
+            return
+    await update.message.reply_text("❌ No active reminders!")
+
 # ============= BUTTON HANDLER ============
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -208,25 +225,30 @@ def snooze(row, minutes):
 
 # ============= MAIN ALARM LOGIC ================
 async def alarm_notification(context: ContextTypes.DEFAULT_TYPE):
-    """Handles initial + 3 auto-retries → missed"""
     data = context.job.data
     row, uid = data["row"], data["uid"]
     
     context.job.schedule_removal()
+    print(f"🔔 ALARM FIRED row={row} user={uid}")  # CONSOLE CONFIRM
     
     r = sheet.row_values(row)
     if not r or r[7] not in ["active", "retry"]:
+        print(f"❌ Row {row} invalid")
         return
     
-    title, message = r[2], r[3]
-    retry_count = int(r[9])
+    title, message = r[2] or "Reminder", r[3] or ""
+    retry_count = int(r[9] or 0)
     
-    text = f"🔔 {'Still pending...' if retry_count > 0 else ''} {title}\n\n{message}"
-    await context.bot.send_message(uid, text, reply_markup=reminder_buttons(row))
+    text = f"🔔 Reminder ({retry_count+1}/4)\n\n📌 {title}\n📝 {message}"
     
-    logging.info(f"Alarm row={row}, retry={retry_count}")
+    try:
+        await context.bot.send_message(uid, text, reply_markup=reminder_buttons(row))
+        print(f"✅ SENT to {uid}, row {row}")
+    except Exception as e:
+        print(f"❌ SEND FAILED: {e}")
+        return
     
-    # 3 RETRIES MAX
+    # AUTO 3 RETRIES
     if retry_count < 3:
         next_time = datetime.now(IST) + timedelta(minutes=10)
         context.job_queue.run_once(
@@ -237,79 +259,63 @@ async def alarm_notification(context: ContextTypes.DEFAULT_TYPE):
         )
         sheet.update_cell(row, 9, retry_count + 1)
         sheet.update_cell(row, 8, "retry")
+        print(f"⏰ Scheduled retry #{retry_count+2}")
     else:
         sheet.update_cell(row, 8, "missed")
-        logging.info(f"Row {row} MARKED MISSED")
+        print(f"🏁 Row {row} MARKED MISSED")
 
 # ============= SCHEDULER =================
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(IST)
     now_str = now.strftime("%Y-%m-%d %H:%M")
     
-    logging.info(f"🔍 [{now_str}] check_reminders RUNNING")
+    print(f"\n🔍 [{now_str}] Scanning...")  # EVERY 30s
     
-    try:
-        rows = sheet.get_all_records()
-        logging.info(f"📊 Found {len(rows)} total rows")
-    except Exception as e:
-        logging.error(f"❌ Sheet error: {e}")
-        return
+    rows = sheet.get_all_records()
+    print(f"📋 {len(rows)} total rows")
     
-    active_count = 0
     for i, r in enumerate(rows, start=2):
         status = r.get("status", "")
-        if status == "active":
-            active_count += 1
-            rem_str = f"{r.get('date', '')} {r.get('time', '')}"
-            logging.info(f"✅ Row {i} ACTIVE: {rem_str} (now={now_str})")
+        if status != "active": 
+            continue
+        
+        date = r.get('date', '')
+        time = r.get('time', '')
+        rem_str = f"{date} {time}".strip()
+        
+        print(f"  Row {i}: {rem_str} | status={status}")
+        
+        if rem_str == now_str:
+            print(f"  🎯 MATCH row {i}!")
             
-            if rem_str == now_str:
-                logging.info(f"🎯 EXACT MATCH row {i}: {rem_str} == {now_str}")
-                
-                # Test fuzzy
-                try:
-                    rem_dt = IST.localize(datetime.strptime(rem_str, "%Y-%m-%d %H:%M"))
-                    delta = abs((now - rem_dt).total_seconds())
-                    logging.info(f"⏱️  Delta: {delta:.1f}s (limit 45s)")
-                    
-                    if delta <= 45:
-                        logging.info(f"🚀 TRIGGERING row {i}")
-                        uid = r["user_id"]
-                        
-                        # Cancel existing
-                        jobs = context.job_queue.get_jobs_by_name(f"alarm-{i}")
-                        for job in jobs:
-                            job.schedule_removal()
-                            logging.info(f"🗑️  Cancelled job for row {i}")
-                        
-                        # Start alarm
-                        context.job_queue.run_once(
-                            alarm_notification,
-                            now + timedelta(seconds=2),
-                            data={"row": i, "uid": uid},
-                            job_kwargs={"name": f"alarm-{i}"}
-                        )
-                        logging.info(f"⏰ Scheduled alarm-{i}")
-                        
-                        # Reset retry count
-                        sheet.update_cell(i, 9, 0)
-                    else:
-                        logging.info(f"⏳ Too late by {delta}s")
-                except Exception as e:
-                    logging.error(f"❌ Parse error row {i}: {e}")
-            else:
-                logging.info(f"⏭️  No match row {i}")
-        else:
-            logging.info(f"⏸️  Row {i} status: {status}")
+            uid = int(r["user_id"])
+            print(f"  👤 User ID: {uid}")
+            
+            # Cancel old jobs
+            jobs = context.job_queue.get_jobs_by_name(f"alarm-{i}")
+            for job in jobs:
+                job.schedule_removal()
+            
+            # START IMMEDIATE ALARM (ignore fuzzy)
+            context.job_queue.run_once(
+                alarm_notification,
+                now + timedelta(seconds=3),
+                data={"row": i, "uid": uid},
+                job_kwargs={"name": f"alarm-{i}"}
+            )
+            print(f"  🚀 TRIGGERED alarm-{i}")
+            
+            sheet.update_cell(i, 9, 0)
+            break  # Only one per cycle
     
-    logging.info(f"📈 Active reminders: {active_count}")
-
+    print("✅ Scan complete\n")
 
 # ============= MAIN ======================
 def main():
     app = Application.builder().token(TOKEN).job_queue(JobQueue()).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("test", test_alarm))  # ← ADD THIS LINE
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_text))
     
@@ -320,4 +326,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
