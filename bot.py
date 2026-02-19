@@ -267,48 +267,40 @@ async def alarm_notification(context: ContextTypes.DEFAULT_TYPE):
 # ============= SCHEDULER =================
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(IST)
-    now_str = now.strftime("%Y-%m-%d %H:%M")
-    
-    print(f"\n🔍 [{now_str}] Scanning...")  # EVERY 30s
+    print(f"\n🔍 [{now.strftime('%H:%M:%S')}] Scanning {len(sheet.get_all_records())} rows")
     
     rows = sheet.get_all_records()
-    print(f"📋 {len(rows)} total rows")
+    triggered = 0
     
     for i, r in enumerate(rows, start=2):
-        status = r.get("status", "")
-        if status != "active": 
+        if r.get("status") != "active": 
             continue
         
-        date = r.get('date', '')
-        time = r.get('time', '')
-        rem_str = f"{date} {time}".strip()
-        
-        print(f"  Row {i}: {rem_str} | status={status}")
-        
-        if rem_str == now_str:
-            print(f"  🎯 MATCH row {i}!")
+        try:
+            rem_dt = IST.localize(datetime.strptime(f"{r['date']} {r['time']}", "%Y-%m-%d %H:%M"))
+            delta_min = abs((now - rem_dt).total_seconds()) / 60
             
-            uid = int(r["user_id"])
-            print(f"  👤 User ID: {uid}")
-            
-            # Cancel old jobs
-            jobs = context.job_queue.get_jobs_by_name(f"alarm-{i}")
-            for job in jobs:
-                job.schedule_removal()
-            
-            # START IMMEDIATE ALARM (ignore fuzzy)
-            context.job_queue.run_once(
-                alarm_notification,
-                now + timedelta(seconds=3),
-                data={"row": i, "uid": uid},
-                job_kwargs={"name": f"alarm-{i}"}
-            )
-            print(f"  🚀 TRIGGERED alarm-{i}")
-            
-            sheet.update_cell(i, 9, 0)
-            break  # Only one per cycle
+            if delta_min <= 2:  # Within 2 minutes
+                uid = int(r["user_id"])
+                print(f"🎯 TRIGGER row {i} (delta={delta_min:.1f}min) uid={uid}")
+                
+                # Cancel old jobs
+                jobs = context.job_queue.get_jobs_by_name(f"alarm-{i}")
+                for job in jobs: job.schedule_removal()
+                
+                # IMMEDIATE ALARM
+                context.job_queue.run_once(
+                    alarm_notification,
+                    now + timedelta(seconds=2),
+                    data={"row": i, "uid": uid},
+                    job_kwargs={"name": f"alarm-{i}"}
+                )
+                triggered += 1
+                sheet.update_cell(i, 9, 0)  # Reset retries
+        except Exception as e:
+            print(f"❌ Row {i} error: {e}")
     
-    print("✅ Scan complete\n")
+    print(f"✅ {triggered} triggered. Next scan 30s.")
 
 # ============= MAIN ======================
 def main():
@@ -326,5 +318,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
