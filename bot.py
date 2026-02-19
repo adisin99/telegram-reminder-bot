@@ -307,22 +307,22 @@ def snooze(row, mins):
 
 # ============= SEND NOTIFICATION ================
 async def send_notification(context: ContextTypes.DEFAULT_TYPE):
-    """Sends notification at exact scheduled time"""
     data = context.job.data
     row = data["row"]
     chat = data["chat"]
     
-    # Self-remove after run
     context.job.schedule_removal()
+    logging.info(f"Snooze/Retry notification row {row} to {chat}")
     
     r = sheet.row_values(row)
-    if not r or r[7] != "active":  # col 8 status (0-index 7)
+    if not r or r[7] != "active":
+        logging.warning(f"Row {row} inactive")
         return
     
     title = r[2]
     msg = r[3]
     
-    text = f"🔔 Reminder!\n\n📌 {title}\n📝 {msg}"
+    text = f"🔔 Still pending...\n\n📌 {title}\n📝 {msg}"
     
     await context.bot.send_message(
         chat_id=chat,
@@ -333,10 +333,15 @@ async def send_notification(context: ContextTypes.DEFAULT_TYPE):
 async def send_notification_immediate(context: ContextTypes.DEFAULT_TYPE, row: int, chat_id: int):
     """Send NOW + schedule 10min retry"""
     r = sheet.row_values(row)
-    title = r[2]
-    msg = r[3]
+    if not r:
+        logging.error(f"No row data {row}")
+        return
+        
+    title = r[2] or "Reminder"
+    msg = r[3] or ""
     
-    text = f"⏰ {title}\n{msg}"
+    text = f"⏰ {title}\n\n{msg}"
+    logging.info(f"Sending immediate to {chat_id}, row {row}")
     
     await context.bot.send_message(
         chat_id=chat_id,
@@ -344,7 +349,7 @@ async def send_notification_immediate(context: ContextTypes.DEFAULT_TYPE, row: i
         reply_markup=reminder_buttons(row)
     )
     
-    # Schedule 10min retry
+    # 10min retry
     retry_time = datetime.now(IST) + timedelta(minutes=10)
     context.job_queue.run_once(
         send_notification,
@@ -352,7 +357,8 @@ async def send_notification_immediate(context: ContextTypes.DEFAULT_TYPE, row: i
         data={"row": row, "chat": chat_id},
         job_kwargs={"name": f"notify-{row}"}
     )
-
+    logging.info(f"Scheduled retry {retry_time} for row {row}")
+    
 # ============= AUTO RETRY ================
 
 async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
@@ -411,6 +417,7 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(IST)
     now_str = now.strftime("%Y-%m-%d %H:%M")
+    logging.info(f"[{now_str}] Checking {len(sheet.get_all_records())} rows")
     
     rows = sheet.get_all_records()
     
@@ -421,26 +428,32 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
         rem_str = f"{r['date']} {r['time']}"
         if rem_str != now_str:
             continue
-            
-        # Fuzzy match ±30 seconds
+        
+        logging.info(f"Potential match row {i}: {rem_str}")
+        
+        # Wider fuzzy: ±60s + try naive if localize fails
         try:
             rem_dt = IST.localize(datetime.strptime(rem_str, "%Y-%m-%d %H:%M"))
-            if abs((now - rem_dt).total_seconds()) > 30:
+            delta = abs((now - rem_dt).total_seconds())
+            logging.info(f"Delta: {delta}s for row {i}")
+            if delta > 60:  # 60s window
                 continue
-        except ValueError:
+        except Exception as e:
+            logging.error(f"DT error row {i}: {e}")
             continue
-            
-        uid = r["user_id"]
         
-        # Cancel any prior jobs
+        uid = r["user_id"]
+        logging.info(f"TRIGGERING row {i} for user {uid}")
+        
+        # Cancel priors
         current_jobs = context.job_queue.get_jobs_by_name(f"notify-{i}")
         for job in current_jobs:
             job.schedule_removal()
         
-        # Send immediate + retry chain starts
+        # Send + retry
         await send_notification_immediate(context, i, uid)
         
-        # Handle repeats
+        # Repeats...
         if r["repeat"] == "none":
             sheet.update_cell(i, 8, "done")
         else:
@@ -458,7 +471,7 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
                 nd = d.replace(year=y, month=m)
             sheet.update_cell(i, 5, nd.strftime("%Y-%m-%d"))
         
-        sheet.update_cell(i, 9, 0)  # reset retries
+        sheet.update_cell(i, 9, 0)
 # ============= MAIN ======================
 
 def main():
@@ -480,7 +493,7 @@ def main():
 
     app.job_queue.run_repeating(
         check_reminders,
-        interval=60,
+        interval=30,
         first=0
     )
 
@@ -492,6 +505,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
