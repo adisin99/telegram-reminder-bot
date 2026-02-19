@@ -243,45 +243,67 @@ async def alarm_notification(context: ContextTypes.DEFAULT_TYPE):
 
 # ============= SCHEDULER =================
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
-    now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
-    rows = sheet.get_all_records()
+    now = datetime.now(IST)
+    now_str = now.strftime("%Y-%m-%d %H:%M")
     
+    logging.info(f"🔍 [{now_str}] check_reminders RUNNING")
+    
+    try:
+        rows = sheet.get_all_records()
+        logging.info(f"📊 Found {len(rows)} total rows")
+    except Exception as e:
+        logging.error(f"❌ Sheet error: {e}")
+        return
+    
+    active_count = 0
     for i, r in enumerate(rows, start=2):
-        if r.get("status") != "active": continue
-        if f"{r['date']} {r['time']}" != now_str: continue
-        
-        # Fuzzy ±45s
-        try:
-            rem_dt = IST.localize(datetime.strptime(f"{r['date']} {r['time']}", "%Y-%m-%d %H:%M"))
-            if abs((datetime.now(IST) - rem_dt).total_seconds()) > 45: continue
-        except: continue
-        
-        uid = r["user_id"]
-        
-        # Cancel existing jobs
-        jobs = context.job_queue.get_jobs_by_name(f"alarm-{i}")
-        for job in jobs: job.schedule_removal()
-        
-        # Start alarm chain
-        context.job_queue.run_once(
-            alarm_notification,
-            datetime.now(IST) + timedelta(seconds=2),
-            data={"row": i, "uid": uid},
-            job_kwargs={"name": f"alarm-{i}"}
-        )
-        
-        # Repeats
-        if r["repeat"] != "none":
-            d = datetime.strptime(r["date"], "%Y-%m-%d")
-            if r["repeat"] == "daily": nd = d + timedelta(days=1)
-            elif r["repeat"] == "weekly": nd = d + timedelta(days=7)
-            elif r["repeat"] == "monthly":
-                m, y = d.month + 1, d.year
-                if m > 12: m, y = 1, y + 1
-                nd = d.replace(year=y, month=m)
-            sheet.update_cell(i, 5, nd.strftime("%Y-%m-%d"))
-        
-        sheet.update_cell(i, 9, 0)
+        status = r.get("status", "")
+        if status == "active":
+            active_count += 1
+            rem_str = f"{r.get('date', '')} {r.get('time', '')}"
+            logging.info(f"✅ Row {i} ACTIVE: {rem_str} (now={now_str})")
+            
+            if rem_str == now_str:
+                logging.info(f"🎯 EXACT MATCH row {i}: {rem_str} == {now_str}")
+                
+                # Test fuzzy
+                try:
+                    rem_dt = IST.localize(datetime.strptime(rem_str, "%Y-%m-%d %H:%M"))
+                    delta = abs((now - rem_dt).total_seconds())
+                    logging.info(f"⏱️  Delta: {delta:.1f}s (limit 45s)")
+                    
+                    if delta <= 45:
+                        logging.info(f"🚀 TRIGGERING row {i}")
+                        uid = r["user_id"]
+                        
+                        # Cancel existing
+                        jobs = context.job_queue.get_jobs_by_name(f"alarm-{i}")
+                        for job in jobs:
+                            job.schedule_removal()
+                            logging.info(f"🗑️  Cancelled job for row {i}")
+                        
+                        # Start alarm
+                        context.job_queue.run_once(
+                            alarm_notification,
+                            now + timedelta(seconds=2),
+                            data={"row": i, "uid": uid},
+                            job_kwargs={"name": f"alarm-{i}"}
+                        )
+                        logging.info(f"⏰ Scheduled alarm-{i}")
+                        
+                        # Reset retry count
+                        sheet.update_cell(i, 9, 0)
+                    else:
+                        logging.info(f"⏳ Too late by {delta}s")
+                except Exception as e:
+                    logging.error(f"❌ Parse error row {i}: {e}")
+            else:
+                logging.info(f"⏭️  No match row {i}")
+        else:
+            logging.info(f"⏸️  Row {i} status: {status}")
+    
+    logging.info(f"📈 Active reminders: {active_count}")
+
 
 # ============= MAIN ======================
 def main():
@@ -298,3 +320,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
