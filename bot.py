@@ -305,7 +305,8 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
     """
     Called every 10 min after a reminder fires.
     Re-notifies the user up to DEFAULT_MAX_RETRIES times.
-    After that, marks the reminder as 'missed'.
+    On the last retry, marks the reminder as 'missed' immediately
+    (no extra notification after the final retry).
     """
     data = context.job.data
     row = data["row"]
@@ -329,26 +330,12 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         count = 0
 
-    # ---- All retries exhausted ----
+    # Safety: if already at or past max, just mark missed silently
     if count >= DEFAULT_MAX_RETRIES:
-        logger.info(f"auto_retry: row {row} exhausted {DEFAULT_MAX_RETRIES} retries. Marking missed.")
-
-        if advance_repeat(row, r):
-            # Repeating reminder: advance to next date, status → active
-            await context.bot.send_message(
-                chat_id=chat,
-                text=f"❌ Reminder missed (will repeat next cycle): {r[2]}",
-                reply_markup=main_menu(),
-            )
-        else:
-            # One-time reminder: mark as missed
+        logger.info(f"auto_retry: row {row} already at max retries. Marking missed silently.")
+        if not advance_repeat(row, r):
             sheet.update_cell(row, 8, "missed")
             sheet.update_cell(row, 9, 0)
-            await context.bot.send_message(
-                chat_id=chat,
-                text=f"❌ Reminder missed: {r[2]}",
-                reply_markup=main_menu(),
-            )
         return
 
     # ---- Send retry notification ----
@@ -367,15 +354,25 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
     )
 
     # Increment retry count in sheet
-    sheet.update_cell(row, 9, count + 1)
+    new_count = count + 1
+    sheet.update_cell(row, 9, new_count)
 
-    # Schedule the next retry (or the final "mark as missed" run)
-    context.job_queue.run_once(
-        auto_retry,
-        DEFAULT_RETRY_INTERVAL,
-        data={"row": row, "chat": chat},
-        name=f"retry-{row}",         # <-- PTB job name (used by get_jobs_by_name)
-    )
+    # ---- Check if this was the LAST retry ----
+    if new_count >= DEFAULT_MAX_RETRIES:
+        # Mark as missed right now — no 4th notification
+        logger.info(f"auto_retry: row {row} sent final retry {new_count}/{DEFAULT_MAX_RETRIES}. Marking missed.")
+        if not advance_repeat(row, r):
+            sheet.update_cell(row, 8, "missed")
+            sheet.update_cell(row, 9, 0)
+        # Do NOT schedule another job
+    else:
+        # Schedule the next retry
+        context.job_queue.run_once(
+            auto_retry,
+            DEFAULT_RETRY_INTERVAL,
+            data={"row": row, "chat": chat},
+            name=f"retry-{row}",
+        )
 
 
 # ============= SCHEDULER =================
@@ -462,3 +459,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
