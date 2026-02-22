@@ -104,7 +104,6 @@ def repeat_kb():
             InlineKeyboardButton("Weekly", callback_data="rep_weekly"),
             InlineKeyboardButton("Monthly", callback_data="rep_monthly"),
         ],
-        [InlineKeyboardButton("✕ Cancel", callback_data="cancel_add")],
     ])
 
 
@@ -135,7 +134,6 @@ def build_calendar_kb(year, month, for_edit=None):
     prefix = f"eday_{for_edit}_" if for_edit else "day_"
 
     for week in weeks:
-        # Skip entire row if all days are either 0 or in the past
         has_future = False
         for day in week:
             if day != 0:
@@ -160,7 +158,6 @@ def build_calendar_kb(year, month, for_edit=None):
                     row.append(InlineKeyboardButton(label, callback_data=f"{prefix}{date_str}"))
         kb.append(row)
 
-    # Quick buttons
     today_str = now.strftime("%Y-%m-%d")
     tmrw_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     quick_prefix = f"eday_{for_edit}_" if for_edit else "day_"
@@ -169,7 +166,6 @@ def build_calendar_kb(year, month, for_edit=None):
         InlineKeyboardButton("Tomorrow", callback_data=f"{quick_prefix}{tmrw_str}"),
     ])
 
-    # Navigation — only forward
     next_m = month + 1
     next_y = year
     if next_m > 12:
@@ -178,7 +174,6 @@ def build_calendar_kb(year, month, for_edit=None):
 
     nav_prefix = f"ecal_{for_edit}_" if for_edit else "cal_"
 
-    # Only show back arrow if prev month is current or future month
     prev_m = month - 1
     prev_y = year
     if prev_m < 1:
@@ -195,8 +190,6 @@ def build_calendar_kb(year, month, for_edit=None):
 
     if for_edit:
         kb.append([InlineKeyboardButton("« Back", callback_data=f"edit_{for_edit}")])
-    else:
-        kb.append([InlineKeyboardButton("✕ Cancel", callback_data="cancel_add")])
 
     return InlineKeyboardMarkup(kb)
 
@@ -206,16 +199,10 @@ def build_calendar_kb(year, month, for_edit=None):
 def parse_time_input(text):
     """
     Parse flexible time input. Returns "HH:MM" (24h) or None.
-    Accepts:
-      7:05 PM, 07:05pm, 7:5 pm, 7:05PM
-      19:05, 9:00, 09:00
-      7pm, 7 PM, 12am
-      7.05 pm, 7.05PM
     """
     s = text.strip()
 
-    # HH:MM or HH.MM with optional am/pm
-    m = re.match(r'^(\d{1,2})[:.](\d{1,2})\s*(am|pm|AM|PM)?$', s)
+    m = re.match(r'^(\d{1,2})[:.]\s*(\d{1,2})\s*(am|pm|AM|PM)?$', s)
     if m:
         h = int(m.group(1))
         mi = int(m.group(2))
@@ -230,7 +217,6 @@ def parse_time_input(text):
             return f"{h:02d}:{mi:02d}"
         return None
 
-    # H am/pm (no minutes)
     m = re.match(r'^(\d{1,2})\s*(am|pm|AM|PM)$', s)
     if m:
         h = int(m.group(1))
@@ -243,7 +229,6 @@ def parse_time_input(text):
             return f"{h:02d}:00"
         return None
 
-    # Pure HH:MM 24h (already matched above, but just in case)
     m = re.match(r'^(\d{1,2}):(\d{1,2})$', s)
     if m:
         h = int(m.group(1))
@@ -253,6 +238,30 @@ def parse_time_input(text):
         return None
 
     return None
+
+
+# ============= TIME VALIDATION ============
+
+def is_past_time(date_str, time_str):
+    """
+    Returns True if the given date+time is in the past (IST).
+    Only rejects if date is today and time already passed.
+    Future dates always return False.
+    """
+    now = datetime.now(IST)
+    try:
+        d = datetime.strptime(normalize_date(date_str), "%Y-%m-%d").date()
+        if d > now.date():
+            return False
+        if d < now.date():
+            return True
+        # Same day — check time
+        t = normalize_time(time_str)
+        h, m = map(int, t.split(":"))
+        reminder_time = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        return now > reminder_time
+    except Exception:
+        return False
 
 
 # ============= HELPERS ====================
@@ -369,7 +378,6 @@ def status_label(status):
 
 
 def reminder_detail(r):
-    """Return formatted detail line for a reminder row."""
     msg = get_reminder_msg(r)
     date_str = normalize_date(r[4]) if len(r) > 4 else ""
     time_str = normalize_time(r[5]) if len(r) > 5 else ""
@@ -522,10 +530,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "add":
         context.user_data.clear()
         context.user_data["step"] = "message"
-        await safe_edit(
-            query.message,
+        await query.message.reply_text(
             "<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\nEnter message:",
-            cancel_kb(),
+            reply_markup=cancel_kb(),
+            parse_mode="HTML",
         )
 
     # ---- CANCEL ADD ----
@@ -558,7 +566,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Enter time:\n"
                 f"<i>e.g. 9pm, 9:30 PM, 21:30</i>"
             ),
-            cancel_kb(),
         )
 
     # ---- SAVE (repeat choice) ----
@@ -720,6 +727,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r = sheet.row_values(row)
         msg, old_date, time_str, repeat_str = reminder_detail(r)
 
+        # Validate: if new date is today, check if existing time already passed
+        if is_past_time(new_date, time_str):
+            now = datetime.now(IST)
+            await safe_edit(
+                query.message,
+                (
+                    f"<b>Edit Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{msg}\n"
+                    f"Current: <i>{format_date_short(old_date)} · {format_time_12h(time_str)}</i>\n\n"
+                    f"⚠ {format_time_12h(time_str)} has already passed today.\n"
+                    f"Pick a future date or change the time first."
+                ),
+                build_calendar_kb(now.year, now.month, for_edit=row),
+            )
+            return
+
         sheet.update_cell(row, 5, new_date)
         context.user_data.clear()
 
@@ -810,18 +833,30 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Invalid time format. Try again:\n"
                     "<i>e.g. 9pm, 9:30 PM, 21:30, 7:05pm</i>"
                 ),
-                reply_markup=cancel_kb(),
                 parse_mode="HTML",
             )
             return
+
+        date_str = context.user_data.get("date", "")
+
+        # Validate: if date is today and time already passed
+        if is_past_time(date_str, parsed):
+            await update.message.reply_text(
+                (
+                    f"⚠ {format_time_12h(parsed)} has already passed today.\n"
+                    f"Enter a future time:"
+                ),
+                parse_mode="HTML",
+            )
+            return
+
         context.user_data["time"] = parsed
         context.user_data["step"] = "repeat"
         msg = context.user_data.get("message", "")
-        date = context.user_data.get("date", "")
         await update.message.reply_text(
             (
                 f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{msg}\n{format_date_short(date)} · {format_time_12h(parsed)}\n\nRepeat?"
+                f"{msg}\n{format_date_short(date_str)} · {format_time_12h(parsed)}\n\nRepeat?"
             ),
             reply_markup=repeat_kb(),
             parse_mode="HTML",
@@ -862,8 +897,24 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML",
                 )
                 return
+
             r = sheet.row_values(row)
             msg, date_str, old_time, repeat_str = reminder_detail(r)
+
+            # Validate: if date is today and new time already passed
+            if is_past_time(date_str, parsed):
+                await update.message.reply_text(
+                    (
+                        f"⚠ {format_time_12h(parsed)} has already passed today.\n"
+                        f"Enter a future time:"
+                    ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("« Back", callback_data=f"edit_{row}")],
+                    ]),
+                    parse_mode="HTML",
+                )
+                return
+
             sheet.update_cell(row, 6, parsed)
             context.user_data.clear()
             await update.message.reply_text(
@@ -1006,4 +1057,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
