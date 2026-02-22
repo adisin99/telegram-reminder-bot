@@ -123,12 +123,56 @@ def list_item_kb(row):
 
 # ============= HELPERS ====================
 
+def normalize_date(val):
+    """Convert any date value from the sheet to YYYY-MM-DD string."""
+    s = str(val).strip()
+    # Already correct format
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    # Try common formats Google Sheets might return
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return s
+
+
+def normalize_time(val):
+    """Convert any time value from the sheet to HH:MM string."""
+    s = str(val).strip()
+    # Already correct format like 09:30 or 9:30
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            h = int(parts[0])
+            m = int(parts[1].split()[0])  # handle "9:30 AM" etc
+            # Handle AM/PM
+            upper = s.upper()
+            if "PM" in upper and h != 12:
+                h += 12
+            elif "AM" in upper and h == 12:
+                h = 0
+            return f"{h:02d}:{m:02d}"
+        except (ValueError, IndexError):
+            return s
+    # Might be a float (time serial: 0.604166 = 14:30)
+    try:
+        f = float(s)
+        total_minutes = round(f * 24 * 60)
+        h = total_minutes // 60
+        m = total_minutes % 60
+        return f"{h:02d}:{m:02d}"
+    except ValueError:
+        return s
+
+
 def advance_repeat(row, r):
     repeat = r[6] if len(r) > 6 else "none"
     if not repeat or repeat == "none":
         return False
 
-    d = datetime.strptime(r[4], "%Y-%m-%d")
+    d = datetime.strptime(normalize_date(r[4]), "%Y-%m-%d")
 
     if repeat == "daily":
         nd = d + timedelta(days=1)
@@ -160,15 +204,15 @@ def cancel_retry_jobs(job_queue, row):
 def format_date_short(date_str):
     """Convert YYYY-MM-DD to a shorter display like 25 Jun."""
     try:
-        d = datetime.strptime(date_str, "%Y-%m-%d")
+        d = datetime.strptime(normalize_date(date_str), "%Y-%m-%d")
         return d.strftime("%-d %b")
     except Exception:
-        return date_str
+        return str(date_str)
 
 
 def format_repeat(repeat):
     mapping = {"none": "Once", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}
-    return mapping.get(repeat, repeat)
+    return mapping.get(str(repeat), str(repeat))
 
 
 # ============= SAFE EDIT ==================
@@ -229,7 +273,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         time = context.user_data.get("time", "")
 
         row = ["", query.from_user.id, title, message, date, time, repeat, "active", 0]
-        sheet.append_row(row)
+        sheet.append_row(row, value_input_option="RAW")
         context.user_data.clear()
 
         await safe_edit(
@@ -345,9 +389,10 @@ async def list_reminders(query):
 
     items = []
     for i, r in enumerate(rows, start=2):
-        if str(r["user_id"]) != str(uid):
+        if str(r.get("user_id", "")) != str(uid):
             continue
-        if r["status"] not in ("active", "pending"):
+        status = str(r.get("status", "")).strip()
+        if status not in ("active", "pending"):
             continue
         items.append((i, r))
 
@@ -365,10 +410,14 @@ async def list_reminders(query):
     # If only one reminder, show it with action buttons
     if len(items) == 1:
         row_idx, r = items[0]
-        status_dot = "●" if r["status"] == "pending" else "○"
+        status = str(r.get("status", ""))
+        status_dot = "●" if status == "pending" else "○"
+        date_str = normalize_date(r.get("date", ""))
+        time_str = normalize_time(r.get("time", ""))
+        repeat_str = format_repeat(r.get("repeat", "none"))
         lines.append(
-            f"\n{status_dot} <b>{r['title']}</b>\n"
-            f"   {format_date_short(str(r['date']))} · {r['time']} · {format_repeat(r['repeat'])}"
+            f"\n{status_dot} <b>{r.get('title', '')}</b>\n"
+            f"   {format_date_short(date_str)} · {time_str} · {repeat_str}"
         )
         await safe_edit(
             query.message,
@@ -386,14 +435,19 @@ async def list_reminders(query):
     # Multiple reminders — show compact list then individual detail buttons
     buttons = []
     for idx, (row_idx, r) in enumerate(items):
-        status_dot = "●" if r["status"] == "pending" else "○"
+        status = str(r.get("status", ""))
+        status_dot = "●" if status == "pending" else "○"
+        date_str = normalize_date(r.get("date", ""))
+        time_str = normalize_time(r.get("time", ""))
+        repeat_str = format_repeat(r.get("repeat", "none"))
+        title = str(r.get("title", ""))
         lines.append(
-            f"\n{status_dot} <b>{r['title']}</b>\n"
-            f"   {format_date_short(str(r['date']))} · {r['time']} · {format_repeat(r['repeat'])}"
+            f"\n{status_dot} <b>{title}</b>\n"
+            f"   {format_date_short(date_str)} · {time_str} · {repeat_str}"
         )
         buttons.append([
-            InlineKeyboardButton(f"1h › {r['title'][:15]}", callback_data=f"snooze_{row_idx}"),
-            InlineKeyboardButton(f"Done › {r['title'][:15]}", callback_data=f"done_{row_idx}"),
+            InlineKeyboardButton(f"1h › {title[:15]}", callback_data=f"snooze_{row_idx}"),
+            InlineKeyboardButton(f"Done › {title[:15]}", callback_data=f"done_{row_idx}"),
         ])
 
     buttons.append([InlineKeyboardButton("« Back", callback_data="home")])
@@ -411,12 +465,18 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
     row = data["row"]
     chat = data["chat"]
 
-    r = sheet.row_values(row)
+    try:
+        r = sheet.row_values(row)
+    except Exception as e:
+        logger.error(f"auto_retry: failed to read row {row}: {e}")
+        return
 
     if not r:
+        logger.warning(f"auto_retry: row {row} is empty")
         return
 
     if r[7] != "pending":
+        logger.info(f"auto_retry: row {row} status is '{r[7]}', not 'pending'. Skipping.")
         return
 
     try:
@@ -425,6 +485,7 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
         count = 0
 
     if count >= DEFAULT_MAX_RETRIES:
+        logger.info(f"auto_retry: row {row} already at max retries ({count}). Marking missed.")
         if not advance_repeat(row, r):
             sheet.update_cell(row, 8, "missed")
             sheet.update_cell(row, 9, 0)
@@ -448,8 +509,11 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
 
     new_count = count + 1
     sheet.update_cell(row, 9, new_count)
+    logger.info(f"auto_retry: row {row} retry {new_count}/{DEFAULT_MAX_RETRIES}")
 
     if new_count >= DEFAULT_MAX_RETRIES:
+        # 3rd retry just sent — mark missed now, no more scheduling
+        logger.info(f"auto_retry: row {row} max retries reached. Marking missed.")
         if not advance_repeat(row, r):
             sheet.update_cell(row, 8, "missed")
             sheet.update_cell(row, 9, 0)
@@ -467,41 +531,53 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(IST)
     now_str = now.strftime("%Y-%m-%d %H:%M")
 
-    rows = sheet.get_all_records()
+    try:
+        rows = sheet.get_all_records()
+    except Exception as e:
+        logger.error(f"check_reminders: failed to read sheet: {e}")
+        return
+
+    logger.debug(f"check_reminders: now={now_str}, rows={len(rows)}")
 
     for i, r in enumerate(rows, start=2):
-        if r["status"] != "active":
+        status = str(r.get("status", "")).strip()
+        if status != "active":
             continue
 
-        rem_str = f"{r['date']} {r['time']}"
+        # Normalize date and time from sheet (handles auto-formatting)
+        date_val = normalize_date(r.get("date", ""))
+        time_val = normalize_time(r.get("time", ""))
+        rem_str = f"{date_val} {time_val}"
+
+        logger.debug(f"check_reminders: row {i} — rem='{rem_str}' vs now='{now_str}' (raw date={r.get('date')!r}, raw time={r.get('time')!r})")
+
         if rem_str != now_str:
             continue
 
-        try:
-            rem_dt = IST.localize(datetime.strptime(rem_str, "%Y-%m-%d %H:%M"))
-            delta = abs((now - rem_dt).total_seconds())
-            if delta > 30:
-                continue
-        except Exception:
-            continue
-
-        uid = r["user_id"]
-        logger.info(f"Firing reminder row {i}: {r['title']} for user {uid}")
+        # Minute matches — fire the reminder
+        uid = r.get("user_id")
+        title = str(r.get("title", ""))
+        message = str(r.get("message", ""))
+        logger.info(f"Firing reminder row {i}: '{title}' for user {uid}")
 
         cancel_retry_jobs(context.job_queue, i)
 
         text = (
             f"<b>Reminder</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"{r['title']}\n{r['message']}"
+            f"{title}\n{message}"
         )
 
-        await context.bot.send_message(
-            chat_id=uid,
-            text=text,
-            reply_markup=reminder_action_kb(i),
-            parse_mode="HTML",
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=text,
+                reply_markup=reminder_action_kb(i),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.error(f"check_reminders: failed to send to {uid}: {e}")
+            continue
 
         sheet.update_cell(i, 8, "pending")
         sheet.update_cell(i, 9, 0)
@@ -512,6 +588,8 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
             data={"row": i, "chat": uid},
             name=f"retry-{i}",
         )
+
+        logger.info(f"Row {i}: status → pending, retry scheduled in {DEFAULT_RETRY_INTERVAL}s")
 
 
 # ============= MAIN ======================
@@ -539,3 +617,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
