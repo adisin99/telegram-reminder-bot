@@ -78,9 +78,7 @@ def home_text():
         "━━━━━━━━━━━━━━━━━━━━\n"
         "Manage your reminders easily.\n\n"
         "Use <b>＋ New</b> or /add to create.\n"
-        "Use /list to view all.\n\n"
-        "<i>Or just type naturally:</i>\n"
-        "<code>Study tomorrow at 9pm</code>"
+        "Use /list to view all."
     )
 
 
@@ -105,20 +103,6 @@ def repeat_kb():
         [
             InlineKeyboardButton("Weekly", callback_data="rep_weekly"),
             InlineKeyboardButton("Monthly", callback_data="rep_monthly"),
-        ],
-        [InlineKeyboardButton("✕ Cancel", callback_data="cancel_add")],
-    ])
-
-
-def nl_repeat_kb():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Once", callback_data="nlrep_none"),
-            InlineKeyboardButton("Daily", callback_data="nlrep_daily"),
-        ],
-        [
-            InlineKeyboardButton("Weekly", callback_data="nlrep_weekly"),
-            InlineKeyboardButton("Monthly", callback_data="nlrep_monthly"),
         ],
         [InlineKeyboardButton("✕ Cancel", callback_data="cancel_add")],
     ])
@@ -151,6 +135,17 @@ def build_calendar_kb(year, month, for_edit=None):
     prefix = f"eday_{for_edit}_" if for_edit else "day_"
 
     for week in weeks:
+        # Skip entire row if all days are either 0 or in the past
+        has_future = False
+        for day in week:
+            if day != 0:
+                day_date = datetime(year, month, day)
+                if day_date.date() >= now.date():
+                    has_future = True
+                    break
+        if not has_future:
+            continue
+
         row = []
         for day in week:
             if day == 0:
@@ -159,7 +154,7 @@ def build_calendar_kb(year, month, for_edit=None):
                 day_date = datetime(year, month, day)
                 date_str = f"{year}-{month:02d}-{day:02d}"
                 if day_date.date() < now.date():
-                    row.append(InlineKeyboardButton("·", callback_data="noop"))
+                    row.append(InlineKeyboardButton(" ", callback_data="noop"))
                 else:
                     label = f"[{day}]" if day_date.date() == now.date() else str(day)
                     row.append(InlineKeyboardButton(label, callback_data=f"{prefix}{date_str}"))
@@ -174,12 +169,7 @@ def build_calendar_kb(year, month, for_edit=None):
         InlineKeyboardButton("Tomorrow", callback_data=f"{quick_prefix}{tmrw_str}"),
     ])
 
-    # Navigation
-    prev_m = month - 1
-    prev_y = year
-    if prev_m < 1:
-        prev_m = 12
-        prev_y -= 1
+    # Navigation — only forward
     next_m = month + 1
     next_y = year
     if next_m > 12:
@@ -187,12 +177,19 @@ def build_calendar_kb(year, month, for_edit=None):
         next_y += 1
 
     nav_prefix = f"ecal_{for_edit}_" if for_edit else "cal_"
+
+    # Only show back arrow if prev month is current or future month
+    prev_m = month - 1
+    prev_y = year
+    if prev_m < 1:
+        prev_m = 12
+        prev_y -= 1
+
     nav_row = []
     if datetime(prev_y, prev_m, 1) >= datetime(now.year, now.month, 1):
         nav_row.append(InlineKeyboardButton("‹", callback_data=f"{nav_prefix}{prev_y}_{prev_m:02d}"))
     else:
         nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
-    nav_row.append(InlineKeyboardButton("·", callback_data="noop"))
     nav_row.append(InlineKeyboardButton("›", callback_data=f"{nav_prefix}{next_y}_{next_m:02d}"))
     kb.append(nav_row)
 
@@ -204,195 +201,58 @@ def build_calendar_kb(year, month, for_edit=None):
     return InlineKeyboardMarkup(kb)
 
 
-# ============= TIME PICKER ===============
+# ============= TIME PARSER ===============
 
-def build_time_hour_kb(for_edit=None):
-    kb = []
-    kb.append([InlineKeyboardButton("Select Hour", callback_data="noop")])
-
-    prefix = f"ehr_{for_edit}_" if for_edit else "hr_"
-
-    # AM
-    kb.append([InlineKeyboardButton("— AM —", callback_data="noop")])
-    am_row1 = []
-    am_row2 = []
-    for h in range(12):
-        label = "12" if h == 0 else str(h)
-        btn = InlineKeyboardButton(label, callback_data=f"{prefix}{h:02d}")
-        if h < 6:
-            am_row1.append(btn)
-        else:
-            am_row2.append(btn)
-    kb.append(am_row1)
-    kb.append(am_row2)
-
-    # PM
-    kb.append([InlineKeyboardButton("— PM —", callback_data="noop")])
-    pm_row1 = []
-    pm_row2 = []
-    for h in range(12, 24):
-        label = "12" if h == 12 else str(h - 12)
-        btn = InlineKeyboardButton(label, callback_data=f"{prefix}{h:02d}")
-        if h < 18:
-            pm_row1.append(btn)
-        else:
-            pm_row2.append(btn)
-    kb.append(pm_row1)
-    kb.append(pm_row2)
-
-    if for_edit:
-        kb.append([InlineKeyboardButton("« Back", callback_data=f"edit_{for_edit}")])
-    else:
-        kb.append([InlineKeyboardButton("✕ Cancel", callback_data="cancel_add")])
-
-    return InlineKeyboardMarkup(kb)
-
-
-def build_time_minute_kb(hour, for_edit=None):
-    kb = []
-    h12 = hour % 12
-    if h12 == 0:
-        h12 = 12
-    ampm = "AM" if hour < 12 else "PM"
-    kb.append([InlineKeyboardButton(f"{h12} {ampm} — Minutes", callback_data="noop")])
-
-    prefix = f"emn_{for_edit}_" if for_edit else "mn_"
-    row = []
-    for m in [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]:
-        time_str = f"{hour:02d}:{m:02d}"
-        row.append(InlineKeyboardButton(f":{m:02d}", callback_data=f"{prefix}{time_str}"))
-        if len(row) == 4:
-            kb.append(row)
-            row = []
-    if row:
-        kb.append(row)
-
-    back_cb = f"edittime_{for_edit}" if for_edit else "time_back"
-    kb.append([InlineKeyboardButton("« Hour", callback_data=back_cb)])
-
-    return InlineKeyboardMarkup(kb)
-
-
-# ============= NATURAL LANGUAGE ===========
-
-def parse_natural_language(text):
+def parse_time_input(text):
     """
-    Parse: "Study tomorrow at 9pm" → ("Study", "2025-07-01", "21:00")
-    Returns (message, date_str, time_str) or None.
+    Parse flexible time input. Returns "HH:MM" (24h) or None.
+    Accepts:
+      7:05 PM, 07:05pm, 7:5 pm, 7:05PM
+      19:05, 9:00, 09:00
+      7pm, 7 PM, 12am
+      7.05 pm, 7.05PM
     """
-    now = datetime.now(IST)
     s = text.strip()
 
-    # Strip "remind me to" / "reminder to" prefix
-    s_clean = re.sub(r'^remind(?:er)?\s+(?:me\s+)?(?:to\s+)?', '', s, flags=re.IGNORECASE)
-    if s_clean == s:
-        # Also try without prefix change
-        s_clean = s
-    working = s_clean
-
-    date_str = None
-    time_str = None
-    date_span = None
-    time_span = None
-
-    low = working.lower()
-
-    # --- TIME ---
-    # HH:MM am/pm
-    m = re.search(r'(?:at\s+)?(\d{1,2}):(\d{2})\s*(am|pm)', low)
+    # HH:MM or HH.MM with optional am/pm
+    m = re.match(r'^(\d{1,2})[:.](\d{1,2})\s*(am|pm|AM|PM)?$', s)
     if m:
-        h, mi = int(m.group(1)), int(m.group(2))
-        if m.group(3) == 'pm' and h != 12:
-            h += 12
-        elif m.group(3) == 'am' and h == 12:
-            h = 0
-        if 0 <= h <= 23 and 0 <= mi <= 59:
-            time_str = f"{h:02d}:{mi:02d}"
-            time_span = m.span()
-
-    # HH:MM 24h
-    if not time_str:
-        m = re.search(r'(?:at\s+)?(\d{1,2}):(\d{2})\b', low)
-        if m:
-            h, mi = int(m.group(1)), int(m.group(2))
-            if 0 <= h <= 23 and 0 <= mi <= 59:
-                time_str = f"{h:02d}:{mi:02d}"
-                time_span = m.span()
-
-    # Hpm / Ham
-    if not time_str:
-        m = re.search(r'(?:at\s+)?(\d{1,2})\s*(am|pm)', low)
-        if m:
-            h = int(m.group(1))
-            if m.group(2) == 'pm' and h != 12:
+        h = int(m.group(1))
+        mi = int(m.group(2))
+        ampm = m.group(3)
+        if ampm:
+            ampm = ampm.lower()
+            if ampm == 'pm' and h != 12:
                 h += 12
-            elif m.group(2) == 'am' and h == 12:
+            elif ampm == 'am' and h == 12:
                 h = 0
-            if 0 <= h <= 23:
-                time_str = f"{h:02d}:00"
-                time_span = m.span()
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return f"{h:02d}:{mi:02d}"
+        return None
 
-    # --- DATE ---
-    # day after tomorrow
-    m = re.search(r'day\s+after\s+tomorrow', low)
+    # H am/pm (no minutes)
+    m = re.match(r'^(\d{1,2})\s*(am|pm|AM|PM)$', s)
     if m:
-        date_str = (now + timedelta(days=2)).strftime("%Y-%m-%d")
-        date_span = m.span()
-
-    if not date_str:
-        m = re.search(r'\btomorrow\b', low)
-        if m:
-            date_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-            date_span = m.span()
-
-    if not date_str:
-        m = re.search(r'\btoday\b', low)
-        if m:
-            date_str = now.strftime("%Y-%m-%d")
-            date_span = m.span()
-
-    # Weekday
-    if not date_str:
-        day_map = {
-            'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
-            'friday': 4, 'saturday': 5, 'sunday': 6,
-            'mon': 0, 'tue': 1, 'wed': 2, 'thu': 3, 'fri': 4, 'sat': 5, 'sun': 6,
-        }
-        pattern = '|'.join(day_map.keys())
-        m = re.search(r'(?:next\s+|on\s+)?(' + pattern + r')\b', low)
-        if m:
-            target = day_map[m.group(1)]
-            diff = (target - now.weekday()) % 7
-            if diff == 0:
-                diff = 7
-            date_str = (now + timedelta(days=diff)).strftime("%Y-%m-%d")
-            date_span = m.span()
-
-    # YYYY-MM-DD
-    if not date_str:
-        m = re.search(r'(\d{4}-\d{2}-\d{2})', low)
-        if m:
-            date_str = m.group(1)
-            date_span = m.span()
-
-    if not date_str or not time_str:
+        h = int(m.group(1))
+        ampm = m.group(2).lower()
+        if ampm == 'pm' and h != 12:
+            h += 12
+        elif ampm == 'am' and h == 12:
+            h = 0
+        if 0 <= h <= 23:
+            return f"{h:02d}:00"
         return None
 
-    # --- MESSAGE: remove date & time parts ---
-    spans = sorted([s for s in [date_span, time_span] if s], key=lambda x: x[0], reverse=True)
-    msg = low
-    for start, end in spans:
-        msg = msg[:start] + msg[end:]
-
-    msg = re.sub(r'\b(at|on|by)\b', '', msg)
-    msg = re.sub(r'\s+', ' ', msg).strip().strip('., ')
-
-    if not msg:
+    # Pure HH:MM 24h (already matched above, but just in case)
+    m = re.match(r'^(\d{1,2}):(\d{1,2})$', s)
+    if m:
+        h = int(m.group(1))
+        mi = int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return f"{h:02d}:{mi:02d}"
         return None
 
-    msg = msg[0].upper() + msg[1:]
-
-    return (msg, date_str, time_str)
+    return None
 
 
 # ============= HELPERS ====================
@@ -567,20 +427,19 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Set reminders and get notified on time.\n\n"
         "<b>Features</b>\n"
         "• One-time & recurring reminders\n"
-        "• Date & time pickers\n"
+        "• Calendar date picker\n"
+        "• Flexible time input\n"
         "• Snooze for 1 hour\n"
         "• Auto-retry 3× every 10 min if missed\n"
-        "• Edit or cancel anytime\n"
-        "• Natural language input\n\n"
+        "• Edit or cancel anytime\n\n"
         "<b>Commands</b>\n"
-        "/add — New reminder (step by step)\n"
+        "/add — New reminder\n"
         "/list — All reminders\n"
         "/info — This page\n\n"
-        "<b>Quick Add</b>\n"
-        "Just type naturally:\n"
-        "<code>Study tomorrow at 9pm</code>\n"
-        "<code>Call mom today at 5:30pm</code>\n"
-        "<code>Meeting on Monday at 10am</code>"
+        "<b>Time Formats</b>\n"
+        "You can enter time in any format:\n"
+        "<code>9pm</code>  <code>9:30 PM</code>  <code>21:30</code>\n"
+        "<code>7:05pm</code>  <code>07:05 AM</code>  <code>14:00</code>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -695,53 +554,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query.message,
             (
                 f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{msg}\n{format_date_short(date_str)}\n\nPick time:"
+                f"{msg}\n{format_date_short(date_str)}\n\n"
+                f"Enter time:\n"
+                f"<i>e.g. 9pm, 9:30 PM, 21:30</i>"
             ),
-            build_time_hour_kb(),
-        )
-
-    # ---- HOUR SELECTED (new) ----
-    elif data.startswith("hr_"):
-        hour = int(data.replace("hr_", ""))
-        context.user_data["selected_hour"] = hour
-        msg = context.user_data.get("message", "")
-        date = context.user_data.get("date", "")
-        await safe_edit(
-            query.message,
-            (
-                f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{msg}\n{format_date_short(date)}\n\nPick minutes:"
-            ),
-            build_time_minute_kb(hour),
-        )
-
-    # ---- BACK TO HOURS (new) ----
-    elif data == "time_back":
-        msg = context.user_data.get("message", "")
-        date = context.user_data.get("date", "")
-        await safe_edit(
-            query.message,
-            (
-                f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{msg}\n{format_date_short(date)}\n\nPick time:"
-            ),
-            build_time_hour_kb(),
-        )
-
-    # ---- MINUTE SELECTED (new) → repeat ----
-    elif data.startswith("mn_"):
-        time_str = data.replace("mn_", "")
-        context.user_data["time"] = time_str
-        context.user_data["step"] = "repeat"
-        msg = context.user_data.get("message", "")
-        date = context.user_data.get("date", "")
-        await safe_edit(
-            query.message,
-            (
-                f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{msg}\n{format_date_short(date)} · {format_time_12h(time_str)}\n\nRepeat?"
-            ),
-            repeat_kb(),
+            cancel_kb(),
         )
 
     # ---- SAVE (repeat choice) ----
@@ -750,25 +567,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = context.user_data.get("message", "")
         date = context.user_data.get("date", "")
         time = context.user_data.get("time", "")
-        row = ["", query.from_user.id, "", message, date, time, repeat, "active", 0]
-        sheet.append_row(row, value_input_option="RAW")
-        context.user_data.clear()
-        await safe_edit(
-            query.message,
-            (
-                f"<b>Saved ✓</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{message}\n"
-                f"{format_date_short(date)} · {format_time_12h(time)} · {format_repeat(repeat)}"
-            ),
-            home_kb(),
-        )
-
-    # ---- NL SAVE (natural language repeat) ----
-    elif data.startswith("nlrep_"):
-        repeat = data.replace("nlrep_", "")
-        message = context.user_data.get("nl_message", "")
-        date = context.user_data.get("nl_date", "")
-        time = context.user_data.get("nl_time", "")
         row = ["", query.from_user.id, "", message, date, time, repeat, "active", 0]
         sheet.append_row(row, value_input_option="RAW")
         context.user_data.clear()
@@ -936,7 +734,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             home_kb(),
         )
 
-    # ---- EDIT TIME (show hour picker) ----
+    # ---- EDIT TIME (text input) ----
     elif data.startswith("edittime_"):
         row = int(data.replace("edittime_", ""))
         context.user_data["editing_row"] = row
@@ -950,50 +748,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"<b>Edit Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
                 f"{msg}\n"
                 f"Current: <i>{format_date_short(date_str)} · {format_time_12h(time_str)}</i>\n\n"
-                f"Pick new time:"
+                f"Enter new time:\n"
+                f"<i>e.g. 9pm, 9:30 PM, 21:30</i>"
             ),
-            build_time_hour_kb(for_edit=row),
-        )
-
-    # ---- EDIT HOUR SELECTED ----
-    elif data.startswith("ehr_"):
-        parts = data.replace("ehr_", "").split("_")
-        row = int(parts[0])
-        hour = int(parts[1])
-        r = sheet.row_values(row)
-        msg, date_str, time_str, repeat_str = reminder_detail(r)
-
-        await safe_edit(
-            query.message,
-            (
-                f"<b>Edit Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{msg}\n"
-                f"Current: <i>{format_date_short(date_str)} · {format_time_12h(time_str)}</i>\n\n"
-                f"Pick minutes:"
-            ),
-            build_time_minute_kb(hour, for_edit=row),
-        )
-
-    # ---- EDIT MINUTE SELECTED ----
-    elif data.startswith("emn_"):
-        parts = data.replace("emn_", "").split("_", 1)
-        row = int(parts[0])
-        new_time = parts[1]
-        r = sheet.row_values(row)
-        msg, date_str, old_time, repeat_str = reminder_detail(r)
-
-        sheet.update_cell(row, 6, new_time)
-        context.user_data.clear()
-
-        await safe_edit(
-            query.message,
-            (
-                f"<b>Updated ✓</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{msg}\n"
-                f"Date: {format_date_short(date_str)}\n"
-                f"Time: {format_time_12h(old_time)} → <b>{format_time_12h(new_time)}</b> · {repeat_str}"
-            ),
-            home_kb(),
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data=f"edit_{row}")],
+            ]),
         )
 
     # ---- CANCEL REMINDER ----
@@ -1027,54 +787,95 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
     text = update.message.text.strip()
 
-    # ---- ACTIVE FLOW ----
-    if step:
-        if step == "message":
-            context.user_data["message"] = text
-            context.user_data["step"] = "date"
-            now = datetime.now(IST)
-            await update.message.reply_text(
-                f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n{text}\n\nPick a date:",
-                reply_markup=build_calendar_kb(now.year, now.month),
-                parse_mode="HTML",
-            )
-
-        elif step == "edit_message":
-            row = context.user_data.get("editing_row")
-            if row:
-                r = sheet.row_values(row)
-                old_msg, date_str, time_str, repeat_str = reminder_detail(r)
-                sheet.update_cell(row, 4, text)
-                context.user_data.clear()
-                await update.message.reply_text(
-                    (
-                        f"<b>Updated ✓</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Message: {old_msg} → <b>{text}</b>\n"
-                        f"{format_date_short(date_str)} · {format_time_12h(time_str)} · {repeat_str}"
-                    ),
-                    reply_markup=home_kb(),
-                    parse_mode="HTML",
-                )
+    if not step:
         return
 
-    # ---- NO ACTIVE FLOW → TRY NATURAL LANGUAGE ----
-    parsed = parse_natural_language(text)
-    if parsed:
-        message, date_str, time_str = parsed
-        context.user_data["nl_message"] = message
-        context.user_data["nl_date"] = date_str
-        context.user_data["nl_time"] = time_str
+    # ---- MESSAGE STEP ----
+    if step == "message":
+        context.user_data["message"] = text
+        context.user_data["step"] = "date"
+        now = datetime.now(IST)
+        await update.message.reply_text(
+            f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n{text}\n\nPick a date:",
+            reply_markup=build_calendar_kb(now.year, now.month),
+            parse_mode="HTML",
+        )
 
+    # ---- TIME STEP (new reminder) ----
+    elif step == "time":
+        parsed = parse_time_input(text)
+        if not parsed:
+            await update.message.reply_text(
+                (
+                    "Invalid time format. Try again:\n"
+                    "<i>e.g. 9pm, 9:30 PM, 21:30, 7:05pm</i>"
+                ),
+                reply_markup=cancel_kb(),
+                parse_mode="HTML",
+            )
+            return
+        context.user_data["time"] = parsed
+        context.user_data["step"] = "repeat"
+        msg = context.user_data.get("message", "")
+        date = context.user_data.get("date", "")
         await update.message.reply_text(
             (
                 f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{message}\n"
-                f"{format_date_short(date_str)} · {format_time_12h(time_str)}\n\n"
-                f"Repeat?"
+                f"{msg}\n{format_date_short(date)} · {format_time_12h(parsed)}\n\nRepeat?"
             ),
-            reply_markup=nl_repeat_kb(),
+            reply_markup=repeat_kb(),
             parse_mode="HTML",
         )
+
+    # ---- EDIT MESSAGE ----
+    elif step == "edit_message":
+        row = context.user_data.get("editing_row")
+        if row:
+            r = sheet.row_values(row)
+            old_msg, date_str, time_str, repeat_str = reminder_detail(r)
+            sheet.update_cell(row, 4, text)
+            context.user_data.clear()
+            await update.message.reply_text(
+                (
+                    f"<b>Updated ✓</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Message: {old_msg} → <b>{text}</b>\n"
+                    f"{format_date_short(date_str)} · {format_time_12h(time_str)} · {repeat_str}"
+                ),
+                reply_markup=home_kb(),
+                parse_mode="HTML",
+            )
+
+    # ---- EDIT TIME ----
+    elif step == "edit_time":
+        row = context.user_data.get("editing_row")
+        if row:
+            parsed = parse_time_input(text)
+            if not parsed:
+                await update.message.reply_text(
+                    (
+                        "Invalid time format. Try again:\n"
+                        "<i>e.g. 9pm, 9:30 PM, 21:30, 7:05pm</i>"
+                    ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("« Back", callback_data=f"edit_{row}")],
+                    ]),
+                    parse_mode="HTML",
+                )
+                return
+            r = sheet.row_values(row)
+            msg, date_str, old_time, repeat_str = reminder_detail(r)
+            sheet.update_cell(row, 6, parsed)
+            context.user_data.clear()
+            await update.message.reply_text(
+                (
+                    f"<b>Updated ✓</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{msg}\n"
+                    f"Date: {format_date_short(date_str)}\n"
+                    f"Time: {format_time_12h(old_time)} → <b>{format_time_12h(parsed)}</b> · {repeat_str}"
+                ),
+                reply_markup=home_kb(),
+                parse_mode="HTML",
+            )
 
 
 # ============= AUTO RETRY ================
@@ -1205,3 +1006,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
