@@ -89,11 +89,11 @@ def fmt_snz(mins):
 
 
 def s_icon(s):
-    return {"active": "○", "pending": "●", "missed": "✗"}.get(str(s), "?")
+    return {"active": "○", "pending": "●", "missed": "✗", "snoozed": "◷"}.get(str(s), "?")
 
 
 def s_label(s):
-    return {"active": "Active", "pending": "Pending", "missed": "Missed"}.get(str(s), str(s))
+    return {"active": "Active", "pending": "Pending", "missed": "Missed", "snoozed": "Snoozed"}.get(str(s), str(s))
 
 
 # ============= NORMALIZERS ================
@@ -181,6 +181,7 @@ def advance_rep(row, r):
     else:
         return False
     sheet.update_cell(row, 3, nd.strftime("%Y-%m-%d"))
+    # Time stays unchanged — snooze doesn't affect recurring schedule
     sheet.update_cell(row, 6, "active")
     sheet.update_cell(row, 7, 0)
     return True
@@ -189,6 +190,14 @@ def advance_rep(row, r):
 def kill_jobs(jq, row):
     for j in jq.get_jobs_by_name(f"retry-{row}"):
         j.schedule_removal()
+    for j in jq.get_jobs_by_name(f"snooze-{row}"):
+        j.schedule_removal()
+
+
+def do_save(uid, ud, msg, date, time, rep):
+    """Save reminder to sheet and clear user_data."""
+    sheet.append_row([uid, msg, date, time, rep, "active", 0], value_input_option="RAW")
+    ud.clear()
 
 
 # ============= UI ========================
@@ -347,8 +356,8 @@ def _find_date(text):
         if m:
             return (now + timedelta(days=delta)).strftime("%Y-%m-%d"), m.start(), m.end()
 
-    days = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']
-    abbrs = ['mon','tue','wed','thu','fri','sat','sun']
+    days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+    abbrs = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
     for i, (full, abr) in enumerate(zip(days, abbrs)):
         m = re.search(rf'\b(?:on\s+)?({full}|{abr})\b', low)
         if m:
@@ -369,9 +378,9 @@ def _find_date(text):
             except ValueError:
                 pass
 
-    months = ['january','february','march','april','may','june',
-              'july','august','september','october','november','december']
-    mabbr = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
+    months = ['january', 'february', 'march', 'april', 'may', 'june',
+              'july', 'august', 'september', 'october', 'november', 'december']
+    mabbr = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
     for mi, (mf, ma) in enumerate(zip(months, mabbr), 1):
         for pt in [rf'\b(?:on\s+)?({mf}|{ma})\s+(\d{{1,2}})\b',
                     rf'\b(?:on\s+)?(\d{{1,2}})\s+({mf}|{ma})\b']:
@@ -389,12 +398,26 @@ def _find_date(text):
     return None
 
 
-def _clean(text, t_span, d_span):
-    spans = sorted([s for s in [t_span, d_span] if s], key=lambda x: x[0], reverse=True)
+def _find_repeat(text):
+    low = text.lower()
+    for pat, val in [
+        (r'\b(?:every\s*day|daily)\b', 'daily'),
+        (r'\b(?:every\s*week|weekly)\b', 'weekly'),
+        (r'\b(?:every\s*month|monthly)\b', 'monthly'),
+        (r'\b(?:once|one[\s-]?time|no\s*repeat)\b', 'none'),
+    ]:
+        m = re.search(pat, low)
+        if m:
+            return val, m.start(), m.end()
+    return None
+
+
+def _clean(text, spans):
+    sorted_spans = sorted([s for s in spans if s], key=lambda x: x[0], reverse=True)
     r = text
-    for s, e in spans:
+    for s, e in sorted_spans:
         r = r[:s] + r[e:]
-    for f in [r'^\s*remind\s+me\s+to\s+', r'^\s*reminder\s+to\s+', r'^\s*reminder\s+', r'^\s*remind\s+to\s+',
+    for f in [r'^\s*remind\s+me\s+to\s+', r'^\s*reminder\s+to\s+', r'^\s*reminder\s+',
               r'^\s*remind\s+me\s+', r'^\s*remember\s+to\s+', r"^\s*don'?t\s+forget\s+to\s+",
               r'^\s*set\s+(?:a\s+)?reminder\s+(?:to\s+|for\s+)?']:
         r = re.sub(f, '', r, flags=re.I)
@@ -405,15 +428,20 @@ def _clean(text, t_span, d_span):
 
 
 def parse_nl(text):
-    tr, dr = _find_time(text), _find_date(text)
+    tr = _find_time(text)
+    dr = _find_date(text)
+    rr = _find_repeat(text)
     ts = tr[0] if tr else None
     ds = dr[0] if dr else None
+    rep = rr[0] if rr else None
     t_sp = (tr[1], tr[2]) if tr else None
     d_sp = (dr[1], dr[2]) if dr else None
-    msg = _clean(text, t_sp, d_sp)
-    if not msg or (not ds and not ts):
+    r_sp = (rr[1], rr[2]) if rr else None
+    msg = _clean(text, [t_sp, d_sp, r_sp])
+    if not msg or not ts:
+        # Need at least message + time to trigger NL
         return None
-    return {'message': msg, 'date': ds, 'time': ts}
+    return {'message': msg, 'date': ds, 'time': ts, 'repeat': rep}
 
 
 # ============= MESSAGE UTILS =============
@@ -498,8 +526,9 @@ async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• Auto-retry 3× every 10 min if missed\n• Edit or cancel anytime\n\n"
         "<b>Smart Input</b>\nJust type naturally:\n"
         "<code>Buy milk tomorrow at 5pm</code>\n"
-        "<code>Call mom today at 3:30pm</code>\n"
-        "<code>Meeting on Monday at 10am</code>\n\n"
+        "<code>Call mom at 3:30pm</code> (defaults to today)\n"
+        "<code>Meeting on Monday at 10am weekly</code>\n"
+        "<code>Pay rent daily at 9am</code>\n\n"
         "<b>Commands</b>\n/add — New reminder\n/list — All reminders\n/info — This page\n\n"
         "<b>Time Formats</b>\n"
         "<code>9pm</code>  <code>9:30 PM</code>  <code>21:30</code>  <code>7:05pm</code>",
@@ -512,7 +541,7 @@ async def show_list(target, uid, new=False):
     rows = sheet.get_all_records()
     items = [(i, r) for i, r in enumerate(rows, 2)
              if str(r.get("user_id", "")) == str(uid)
-             and str(r.get("status", "")).strip() in ("active", "pending", "missed")]
+             and str(r.get("status", "")).strip() in ("active", "pending", "missed", "snoozed")]
 
     if not items:
         t = f"{hdr('Reminders')}\nNo reminders found."
@@ -544,6 +573,28 @@ async def show_list(target, uid, new=False):
         await target.reply_text(t, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
     else:
         await safe_edit(target, t, InlineKeyboardMarkup(btns))
+
+
+# ============= SAVE OR ASK REPEAT ========
+
+async def finish_or_repeat(target, uid, ud, msg, date, time, edit_msg=False):
+    """If repeat already known (from NL), save directly. Otherwise ask."""
+    rep = ud.get("repeat")
+    if rep:
+        do_save(uid, ud, msg, date, time, rep)
+        txt = f"{hdr('Saved ✓')}\n{detail(msg, date, time, fmt_rep(rep))}"
+        if edit_msg:
+            await safe_edit(target, txt, home_kb())
+        else:
+            await target.reply_text(txt, reply_markup=home_kb(), parse_mode="HTML")
+    else:
+        ud["step"] = "repeat"
+        txt = f"{hdr('New Reminder')}\n{detail(msg, date, time)}\n\nRepeat?"
+        if edit_msg:
+            await safe_edit(target, txt, repeat_kb())
+        else:
+            sent = await target.reply_text(txt, reply_markup=repeat_kb(), parse_mode="HTML")
+            save_p(ud, sent)
 
 
 # ============= BUTTON HANDLER ============
@@ -618,9 +669,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         f"{hdr('New Reminder')}\n{msg}\n{fmt_time(ts)}\n\n"
                         f"{past_msg(ts)}\nPick a future date:", cal_kb(now.year, now.month))
                     return
-                ud["step"] = "repeat"
-                await safe_edit(q.message,
-                    f"{hdr('New Reminder')}\n{detail(msg, date_str, ts)}\n\nRepeat?", repeat_kb())
+                await finish_or_repeat(q.message, q.from_user.id, ud, msg, date_str, ts, edit_msg=True)
             else:
                 ud["step"] = "time"
                 await safe_edit(q.message,
@@ -632,8 +681,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("rep_"):
         rep = data[4:]
         msg, date, time = ud.get("message", ""), ud.get("date", ""), ud.get("time", "")
-        sheet.append_row([q.from_user.id, msg, date, time, rep, "active", 0], value_input_option="RAW")
-        ud.clear()
+        do_save(q.from_user.id, ud, msg, date, time, rep)
         await safe_edit(q.message,
             f"{hdr('Saved ✓')}\n{detail(msg, date, time, fmt_rep(rep))}", home_kb())
 
@@ -667,10 +715,22 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         kill_jobs(ctx.job_queue, row)
         await rm_btns(ctx, row)
         nt = datetime.now(IST) + timedelta(minutes=mins)
-        sheet.update_cell(row, 3, nt.strftime("%Y-%m-%d"))
-        sheet.update_cell(row, 4, nt.strftime("%H:%M"))
-        sheet.update_cell(row, 6, "active")
-        sheet.update_cell(row, 7, 0)
+        rep = r[4] if len(r) > 4 else "none"
+
+        if rep and rep != "none":
+            # REPEAT reminder: don't change date/time in sheet
+            # Schedule one-time snooze job, mark as "snoozed"
+            sheet.update_cell(row, 6, "snoozed")
+            sheet.update_cell(row, 7, 0)
+            ctx.job_queue.run_once(snooze_fire, mins * 60,
+                data={"row": row, "chat": q.from_user.id}, name=f"snooze-{row}")
+        else:
+            # ONE-TIME reminder: update date/time as before
+            sheet.update_cell(row, 3, nt.strftime("%Y-%m-%d"))
+            sheet.update_cell(row, 4, nt.strftime("%H:%M"))
+            sheet.update_cell(row, 6, "active")
+            sheet.update_cell(row, 7, 0)
+
         ctx.bot_data.pop(f"r_{row}", None)
         await safe_edit(q.message,
             f"{detail(msg, ds, ts, rs)}\n\n<b>Snoozed {fmt_snz(mins)}</b> → {fmt_time(nt.strftime('%H:%M'))}")
@@ -769,42 +829,35 @@ async def _try_nl(update, ctx, text):
     result = parse_nl(text)
     if not result:
         return
-    msg, date, time = result['message'], result['date'], result['time']
+    msg = result['message']
+    time = result['time']
+    date = result['date']
+    rep = result.get('repeat')
     if not msg:
         return
+
     ud = ctx.user_data
     ud.clear()
     ud["message"] = msg
+    ud["time"] = time
+    if rep:
+        ud["repeat"] = rep
 
-    if date and time:
-        if is_past(date, time):
-            ud["time"], ud["step"] = time, "date"
-            now = datetime.now(IST)
-            sent = await update.message.reply_text(
-                f"{hdr('New Reminder')}\n{msg}\n\n{past_msg(time)}\nPick a future date:",
-                reply_markup=cal_kb(now.year, now.month), parse_mode="HTML")
-            save_p(ud, sent)
-        else:
-            ud["date"], ud["time"] = date, time
-            sent = await update.message.reply_text(
-                f"{hdr('New Reminder')}\n{detail(msg, date, time)}\n\nRepeat?",
-                reply_markup=repeat_kb(), parse_mode="HTML")
-            save_p(ud, sent)
+    # Default date to today if not specified
+    if not date:
+        date = datetime.now(IST).strftime("%Y-%m-%d")
 
-    elif time and not date:
-        ud["time"], ud["step"] = time, "date"
+    if is_past(date, time):
+        # Time passed today — ask user to pick a future date
+        ud["step"] = "date"
         now = datetime.now(IST)
         sent = await update.message.reply_text(
-            f"{hdr('New Reminder')}\n{msg}\n{fmt_time(time)}\n\nPick a date:",
+            f"{hdr('New Reminder')}\n{msg}\n\n{past_msg(time)}\nPick a future date:",
             reply_markup=cal_kb(now.year, now.month), parse_mode="HTML")
         save_p(ud, sent)
-
-    elif date and not time:
-        ud["date"], ud["step"] = date, "time"
-        sent = await update.message.reply_text(
-            f"{hdr('New Reminder')}\n{msg}\n{fmt_date(date)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
-            reply_markup=cancel_kb(), parse_mode="HTML")
-        save_p(ud, sent)
+    else:
+        ud["date"] = date
+        await finish_or_repeat(update.message, update.effective_user.id, ud, msg, date, time)
 
 
 async def _do_step(update, ctx, step, text):
@@ -830,12 +883,9 @@ async def _do_step(update, ctx, step, text):
             await update.message.reply_text(f"{past_msg(parsed)}\nEnter a future time:", parse_mode="HTML")
             return
         await del_prompt(ctx, ud)
-        ud["time"], ud["step"] = parsed, "repeat"
+        ud["time"] = parsed
         msg = ud.get("message", "")
-        sent = await update.message.reply_text(
-            f"{hdr('New Reminder')}\n{detail(msg, ds, parsed)}\n\nRepeat?",
-            reply_markup=repeat_kb(), parse_mode="HTML")
-        save_p(ud, sent)
+        await finish_or_repeat(update.message, update.effective_user.id, ud, msg, ds, parsed)
 
     elif step == "edit_message":
         row = ud.get("editing_row")
@@ -870,6 +920,41 @@ async def _do_step(update, ctx, step, text):
             f"{hdr('Updated ✓')}\n{msg}\nDate: {fmt_date(ds)}\n"
             f"Time: {fmt_time(old_t)} → <b>{fmt_time(parsed)}</b> · {rs}",
             reply_markup=home_kb(), parse_mode="HTML")
+
+
+# ============= SNOOZE FIRE ================
+
+async def snooze_fire(ctx: ContextTypes.DEFAULT_TYPE):
+    """Fires a snoozed repeat reminder without changing its original schedule."""
+    row = ctx.job.data["row"]
+    chat = ctx.job.data["chat"]
+    try:
+        r = sheet.row_values(row)
+    except Exception as e:
+        logger.error(f"snooze_fire row {row}: {e}")
+        return
+    if not r or len(r) <= 5:
+        return
+    # Only fire if still snoozed
+    if r[5] != "snoozed":
+        return
+
+    msg = str(r[1]).strip()
+    await rm_btns(ctx, row)
+
+    try:
+        sent = await ctx.bot.send_message(chat_id=chat,
+            text=f"{msg}\n\n<b>⏰ Reminder</b>",
+            reply_markup=act_kb(row), parse_mode="HTML")
+        save_rm(ctx, row, chat, sent.message_id)
+    except Exception as e:
+        logger.error(f"snooze_fire send {chat}: {e}")
+        return
+
+    sheet.update_cell(row, 6, "pending")
+    sheet.update_cell(row, 7, 0)
+    ctx.job_queue.run_once(auto_retry, RETRY_INTERVAL,
+        data={"row": row, "chat": chat}, name=f"retry-{row}")
 
 
 # ============= AUTO RETRY ================
@@ -976,5 +1061,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
