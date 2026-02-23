@@ -394,7 +394,7 @@ def _clean(text, t_span, d_span):
     r = text
     for s, e in spans:
         r = r[:s] + r[e:]
-    for f in [r'^\s*remind\s+me\s+to\s+', r'^\s*reminder\s+to\s+', r'^\s*reminder\s+',
+    for f in [r'^\s*remind\s+me\s+to\s+', r'^\s*reminder\s+to\s+', r'^\s*reminder\s+', r'^\s*remind\s+to\s+',
               r'^\s*remind\s+me\s+', r'^\s*remember\s+to\s+', r"^\s*don'?t\s+forget\s+to\s+",
               r'^\s*set\s+(?:a\s+)?reminder\s+(?:to\s+|for\s+)?']:
         r = re.sub(f, '', r, flags=re.I)
@@ -976,4 +976,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
