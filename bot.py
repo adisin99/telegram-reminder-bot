@@ -482,7 +482,6 @@ def store_reminder_msg(context, row, chat_id, msg_id):
 # ============= POST INIT =================
 async def post_init(application):
     await application.bot.set_my_commands([
-        BotCommand("start", "Start the bot"),
         BotCommand("add", "New reminder"),
         BotCommand("list", "All reminders"),
         BotCommand("info", "About this bot"),
@@ -1292,3 +1291,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
