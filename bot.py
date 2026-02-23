@@ -482,6 +482,7 @@ def store_reminder_msg(context, row, chat_id, msg_id):
 # ============= POST INIT =================
 async def post_init(application):
     await application.bot.set_my_commands([
+        BotCommand("start", "Start the bot"),
         BotCommand("add", "New reminder"),
         BotCommand("list", "All reminders"),
         BotCommand("info", "About this bot"),
@@ -669,7 +670,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(
             query.message,
             (
-                f"<b>Saved 🕰️</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Saved ✓</b>\n━━━━━━━━━━━━━━━━━━━━\n"
                 f"{message}\n"
                 f"{format_date_short(date)} · {format_time_12h(time)} · {format_repeat(repeat)}"
             ),
@@ -812,7 +813,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (
                 f"{msg}\n"
                 f"{format_date_short(date_str)} · {format_time_12h(time_str)} · {repeat_str}\n\n"
-                f"<b>Done</b> ✅"
+                f"<b>Done</b> ✓"
             ),
         )
 
@@ -1162,7 +1163,7 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
 
     msg = get_reminder_msg(r)
     new_count = count + 1
-    text = f"{msg}\n\n<b>⏰Reminder</b> ({new_count}/{DEFAULT_MAX_RETRIES})"
+    text = f"{msg}\n\n<b>Reminder</b> ({new_count}/{DEFAULT_MAX_RETRIES})"
 
     sent_msg = await context.bot.send_message(
         chat_id=chat, text=text,
