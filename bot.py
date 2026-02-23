@@ -76,6 +76,8 @@ def home_text():
         "━━━━━━━━━━━━━━━━━━━━\n"
         "Manage your reminders easily.\n\n"
         "Use <b>＋ New</b> or /add to create.\n"
+        "Or just type naturally:\n"
+        "<i>Buy milk tomorrow at 5pm</i>\n\n"
         "Use /list to view all."
     )
 
@@ -103,6 +105,20 @@ def repeat_kb():
             InlineKeyboardButton("Monthly", callback_data="rep_monthly"),
         ],
         [InlineKeyboardButton("✕ Cancel", callback_data="cancel_add")],
+    ])
+
+
+def nl_repeat_kb():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Once", callback_data="nlrep_none"),
+            InlineKeyboardButton("Daily", callback_data="nlrep_daily"),
+        ],
+        [
+            InlineKeyboardButton("Weekly", callback_data="nlrep_weekly"),
+            InlineKeyboardButton("Monthly", callback_data="nlrep_monthly"),
+        ],
+        [InlineKeyboardButton("✕ Cancel", callback_data="nlcancel")],
     ])
 
 
@@ -145,7 +161,7 @@ def format_snooze_label(mins):
 
 # ============= CALENDAR PICKER ============
 
-def build_calendar_kb(year, month, for_edit=None):
+def build_calendar_kb(year, month, for_edit=None, for_nl=False):
     now = datetime.now(IST)
     kb = []
 
@@ -158,7 +174,16 @@ def build_calendar_kb(year, month, for_edit=None):
     ])
 
     weeks = cal_module.monthcalendar(year, month)
-    prefix = f"eday_{for_edit}_" if for_edit else "day_"
+
+    if for_edit:
+        day_prefix = f"eday_{for_edit}_"
+        nav_prefix = f"ecal_{for_edit}_"
+    elif for_nl:
+        day_prefix = "nlday_"
+        nav_prefix = "nlcal_"
+    else:
+        day_prefix = "day_"
+        nav_prefix = "cal_"
 
     for week in weeks:
         has_future = False
@@ -182,15 +207,14 @@ def build_calendar_kb(year, month, for_edit=None):
                     row.append(InlineKeyboardButton(" ", callback_data="noop"))
                 else:
                     label = f"[{day}]" if day_date.date() == now.date() else str(day)
-                    row.append(InlineKeyboardButton(label, callback_data=f"{prefix}{date_str}"))
+                    row.append(InlineKeyboardButton(label, callback_data=f"{day_prefix}{date_str}"))
         kb.append(row)
 
     today_str = now.strftime("%Y-%m-%d")
     tmrw_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-    quick_prefix = f"eday_{for_edit}_" if for_edit else "day_"
     kb.append([
-        InlineKeyboardButton("Today", callback_data=f"{quick_prefix}{today_str}"),
-        InlineKeyboardButton("Tomorrow", callback_data=f"{quick_prefix}{tmrw_str}"),
+        InlineKeyboardButton("Today", callback_data=f"{day_prefix}{today_str}"),
+        InlineKeyboardButton("Tomorrow", callback_data=f"{day_prefix}{tmrw_str}"),
     ])
 
     next_m = month + 1
@@ -198,8 +222,6 @@ def build_calendar_kb(year, month, for_edit=None):
     if next_m > 12:
         next_m = 1
         next_y += 1
-
-    nav_prefix = f"ecal_{for_edit}_" if for_edit else "cal_"
 
     prev_m = month - 1
     prev_y = year
@@ -217,6 +239,8 @@ def build_calendar_kb(year, month, for_edit=None):
 
     if for_edit:
         kb.append([InlineKeyboardButton("« Back", callback_data=f"edit_{for_edit}")])
+    elif for_nl:
+        kb.append([InlineKeyboardButton("✕ Cancel", callback_data="nlcancel")])
     else:
         kb.append([InlineKeyboardButton("✕ Cancel", callback_data="cancel_add")])
 
@@ -266,6 +290,227 @@ def parse_time_input(text):
     return None
 
 
+# ============= NATURAL LANGUAGE ===========
+
+def _convert_to_24h(h, mi, ampm):
+    ampm = ampm.lower()
+    if ampm == 'pm' and h != 12:
+        h += 12
+    elif ampm == 'am' and h == 12:
+        h = 0
+    if 0 <= h <= 23 and 0 <= mi <= 59:
+        return f"{h:02d}:{mi:02d}"
+    return None
+
+
+def extract_time_from_text(text):
+    """Find time pattern in text. Returns (HH:MM, start, end) or None."""
+
+    # "at/by 9:30 pm" or "at/by 9.30pm"
+    m = re.search(r'(?:at|by)\s+(\d{1,2})[:.]\s*(\d{1,2})\s*(am|pm)', text, re.I)
+    if m:
+        t = _convert_to_24h(int(m.group(1)), int(m.group(2)), m.group(3))
+        if t:
+            return (t, m.start(), m.end())
+
+    # "at/by 9 pm" or "at/by 9pm"
+    m = re.search(r'(?:at|by)\s+(\d{1,2})\s*(am|pm)', text, re.I)
+    if m:
+        t = _convert_to_24h(int(m.group(1)), 0, m.group(2))
+        if t:
+            return (t, m.start(), m.end())
+
+    # "at/by 21:30" (24h with at/by)
+    m = re.search(r'(?:at|by)\s+(\d{1,2}):(\d{2})\b', text, re.I)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return (f"{h:02d}:{mi:02d}", m.start(), m.end())
+
+    # "9:30 pm" or "9.30pm" (without at/by)
+    m = re.search(r'(\d{1,2})[:.]\s*(\d{1,2})\s*(am|pm)', text, re.I)
+    if m:
+        t = _convert_to_24h(int(m.group(1)), int(m.group(2)), m.group(3))
+        if t:
+            return (t, m.start(), m.end())
+
+    # "9pm" or "9 pm" (without at/by)
+    m = re.search(r'(\d{1,2})\s*(am|pm)', text, re.I)
+    if m:
+        t = _convert_to_24h(int(m.group(1)), 0, m.group(2))
+        if t:
+            return (t, m.start(), m.end())
+
+    return None
+
+
+def extract_date_from_text(text):
+    """Find date keyword/pattern in text. Returns (YYYY-MM-DD, start, end) or None."""
+    now = datetime.now(IST)
+    lower = text.lower()
+
+    # "day after tomorrow"
+    m = re.search(r'\bday\s+after\s+tomorrow\b', lower)
+    if m:
+        d = now + timedelta(days=2)
+        return (d.strftime("%Y-%m-%d"), m.start(), m.end())
+
+    # "today" or "tonight"
+    m = re.search(r'\b(today|tonight)\b', lower)
+    if m:
+        return (now.strftime("%Y-%m-%d"), m.start(), m.end())
+
+    # "tomorrow" / "tmrw" / "tmr"
+    m = re.search(r'\b(tomorrow|tmrw|tmr)\b', lower)
+    if m:
+        d = now + timedelta(days=1)
+        return (d.strftime("%Y-%m-%d"), m.start(), m.end())
+
+    # "next week"
+    m = re.search(r'\bnext\s+week\b', lower)
+    if m:
+        d = now + timedelta(days=7)
+        return (d.strftime("%Y-%m-%d"), m.start(), m.end())
+
+    # Day names: "monday", "on monday", "on mon"
+    days_full = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+    days_abbr = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+    for i, (full, abbr) in enumerate(zip(days_full, days_abbr)):
+        m = re.search(rf'\b(?:on\s+)?({full}|{abbr})\b', lower)
+        if m:
+            current_day = now.weekday()
+            target_day = i
+            delta = (target_day - current_day) % 7
+            if delta == 0:
+                delta = 7
+            d = now + timedelta(days=delta)
+            return (d.strftime("%Y-%m-%d"), m.start(), m.end())
+
+    # "on 25th" / "on 25" / "25th"
+    m = re.search(r'(?:on\s+)?(\d{1,2})\s*(?:st|nd|rd|th)\b', lower)
+    if m:
+        day = int(m.group(1))
+        if 1 <= day <= 31:
+            try:
+                d = now.replace(day=day)
+                if d.date() < now.date():
+                    month = now.month + 1
+                    year = now.year
+                    if month > 12:
+                        month = 1
+                        year += 1
+                    d = d.replace(year=year, month=month)
+                return (d.strftime("%Y-%m-%d"), m.start(), m.end())
+            except ValueError:
+                pass
+
+    # Month names: "on June 25", "on 25 June", "June 25", "25 June"
+    months = ['january', 'february', 'march', 'april', 'may', 'june',
+              'july', 'august', 'september', 'october', 'november', 'december']
+    months_abbr = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                   'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+
+    for mi_idx, (mfull, mabbr) in enumerate(zip(months, months_abbr), 1):
+        # "June 25" or "Jun 25"
+        m = re.search(rf'\b(?:on\s+)?({mfull}|{mabbr})\s+(\d{{1,2}})\b', lower)
+        if m:
+            day = int(m.group(2))
+            try:
+                year = now.year
+                d = datetime(year, mi_idx, day)
+                if d.date() < now.date():
+                    d = datetime(year + 1, mi_idx, day)
+                return (d.strftime("%Y-%m-%d"), m.start(), m.end())
+            except ValueError:
+                pass
+
+        # "25 June" or "25 Jun"
+        m = re.search(rf'\b(?:on\s+)?(\d{{1,2}})\s+({mfull}|{mabbr})\b', lower)
+        if m:
+            day = int(m.group(1))
+            try:
+                year = now.year
+                d = datetime(year, mi_idx, day)
+                if d.date() < now.date():
+                    d = datetime(year + 1, mi_idx, day)
+                return (d.strftime("%Y-%m-%d"), m.start(), m.end())
+            except ValueError:
+                pass
+
+    return None
+
+
+def clean_message(text, time_span, date_span):
+    """Remove matched time/date spans and filler prefixes."""
+    spans = []
+    if time_span:
+        spans.append(time_span)
+    if date_span:
+        spans.append(date_span)
+    spans.sort(key=lambda x: x[0], reverse=True)
+
+    result = text
+    for start, end in spans:
+        result = result[:start] + result[end:]
+
+    # Remove filler prefixes
+    fillers = [
+        r'^\s*remind\s+me\s+to\s+',
+        r'^\s*reminder\s+to\s+',
+        r'^\s*reminder\s+',
+        r'^\s*remind\s+me\s+',
+        r'^\s*remember\s+to\s+',
+        r'^\s*don\'?t\s+forget\s+to\s+',
+        r'^\s*set\s+reminder\s+(?:to\s+|for\s+)?',
+        r'^\s*set\s+(?:a\s+)?reminder\s+(?:to\s+|for\s+)?',
+    ]
+    for filler in fillers:
+        result = re.sub(filler, '', result, flags=re.I)
+
+    # Remove trailing/leading filler words
+    result = re.sub(r'\s+', ' ', result).strip()
+    result = result.strip('.,;:!? ')
+
+    # Remove leftover "on" at start/end
+    result = re.sub(r'^\s*on\s+', '', result, flags=re.I).strip()
+    result = re.sub(r'\s+on\s*$', '', result, flags=re.I).strip()
+
+    # Capitalize first letter
+    if result:
+        result = result[0].upper() + result[1:]
+
+    return result
+
+
+def parse_natural_text(text):
+    """Extract message, date, time from natural text.
+    Returns dict with 'message', 'date', 'time' (any can be None) or None."""
+
+    time_result = extract_time_from_text(text)
+    date_result = extract_date_from_text(text)
+
+    time_str = time_result[0] if time_result else None
+    time_span = (time_result[1], time_result[2]) if time_result else None
+
+    date_str = date_result[0] if date_result else None
+    date_span = (date_result[1], date_result[2]) if date_result else None
+
+    message = clean_message(text, time_span, date_span)
+
+    if not message:
+        return None
+
+    # Need at least message + one of (date, time)
+    if not date_str and not time_str:
+        return None
+
+    return {
+        'message': message,
+        'date': date_str,
+        'time': time_str,
+    }
+
+
 # ============= TIME VALIDATION ============
 
 def is_past_time(date_str, time_str):
@@ -287,7 +532,6 @@ def is_past_time(date_str, time_str):
 # ============= HELPERS ====================
 
 def get_reminder_msg(r):
-    """Get message from row. Col 2 (index 1) = message."""
     msg = r[1] if len(r) > 1 else ""
     return str(msg).strip()
 
@@ -337,8 +581,6 @@ def normalize_time(val):
 
 
 def advance_repeat(row, r):
-    """Advance to next occurrence for repeating reminders.
-    r is 0-indexed list. Col 5 (idx 4) = repeat, Col 3 (idx 2) = date."""
     repeat = r[4] if len(r) > 4 else "none"
     if not repeat or repeat == "none":
         return False
@@ -356,9 +598,9 @@ def advance_repeat(row, r):
         nd = d.replace(year=y, month=m)
     else:
         return False
-    sheet.update_cell(row, 3, nd.strftime("%Y-%m-%d"))   # date col
-    sheet.update_cell(row, 6, "active")                   # status col
-    sheet.update_cell(row, 7, 0)                          # retry_count col
+    sheet.update_cell(row, 3, nd.strftime("%Y-%m-%d"))
+    sheet.update_cell(row, 6, "active")
+    sheet.update_cell(row, 7, 0)
     return True
 
 
@@ -406,8 +648,6 @@ def status_label(status):
 
 
 def reminder_detail(r):
-    """Extract display fields from 0-indexed row list.
-    idx 1=message, 2=date, 3=time, 4=repeat"""
     msg = get_reminder_msg(r)
     date_str = normalize_date(r[2]) if len(r) > 2 else ""
     time_str = normalize_time(r[3]) if len(r) > 3 else ""
@@ -528,6 +768,12 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Snooze (15m to 12h)\n"
         "• Auto-retry 3× every 10 min if missed\n"
         "• Edit or cancel anytime\n\n"
+        "<b>Smart Input</b>\n"
+        "Just type naturally:\n"
+        "<code>Buy milk tomorrow at 5pm</code>\n"
+        "<code>Call mom today at 3:30pm</code>\n"
+        "<code>Meeting on Monday at 10am</code>\n"
+        "<code>Pay rent on Friday at 9am</code>\n\n"
         "<b>Commands</b>\n"
         "/add — New reminder\n"
         "/list — All reminders\n"
@@ -628,6 +874,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         await safe_edit(query.message, home_text(), home_kb())
 
+    # ---- NL CANCEL ----
+    elif data == "nlcancel":
+        context.user_data.clear()
+        await safe_edit(query.message, home_text(), home_kb())
+
     # ---- CALENDAR NAV (new) ----
     elif data.startswith("cal_"):
         parts = data.replace("cal_", "").split("_")
@@ -658,7 +909,94 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         store_prompt(context.user_data, query.message)
 
-    # ---- SAVE (repeat choice) ----
+    # ---- NL CALENDAR NAV ----
+    elif data.startswith("nlcal_"):
+        parts = data.replace("nlcal_", "").split("_")
+        year, month = int(parts[0]), int(parts[1])
+        msg = context.user_data.get("nl_message", "")
+        time_str = context.user_data.get("nl_time", "")
+        time_display = f"\n{format_time_12h(time_str)}" if time_str else ""
+        await safe_edit(
+            query.message,
+            (
+                f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"{msg}{time_display}\n\nPick a date:"
+            ),
+            build_calendar_kb(year, month, for_nl=True),
+        )
+
+    # ---- NL DAY SELECTED ----
+    elif data.startswith("nlday_"):
+        date_str = data.replace("nlday_", "")
+        msg = context.user_data.get("nl_message", "")
+        time_str = context.user_data.get("nl_time", "")
+
+        if time_str:
+            # Have both date and time → validate and ask repeat
+            if is_past_time(date_str, time_str):
+                now = datetime.now(IST)
+                await safe_edit(
+                    query.message,
+                    (
+                        f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{msg}\n{format_time_12h(time_str)}\n\n"
+                        f"⚠ {format_time_12h(time_str)} has already passed today.\n"
+                        f"Pick a future date:"
+                    ),
+                    build_calendar_kb(now.year, now.month, for_nl=True),
+                )
+                return
+
+            context.user_data["nl_date"] = date_str
+            await safe_edit(
+                query.message,
+                (
+                    f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{msg}\n{format_date_short(date_str)} · {format_time_12h(time_str)}\n\nRepeat?"
+                ),
+                nl_repeat_kb(),
+            )
+        else:
+            # Have date but no time → ask for time
+            context.user_data["nl_date"] = date_str
+            context.user_data["step"] = "nl_time"
+            await safe_edit(
+                query.message,
+                (
+                    f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{msg}\n{format_date_short(date_str)}\n\n"
+                    f"Enter time:\n"
+                    f"<i>e.g. 9pm, 9:30 PM, 21:30</i>"
+                ),
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✕ Cancel", callback_data="nlcancel")],
+                ]),
+            )
+            store_prompt(context.user_data, query.message)
+
+    # ---- NL REPEAT SAVE ----
+    elif data.startswith("nlrep_"):
+        repeat = data.replace("nlrep_", "")
+        msg = context.user_data.get("nl_message", "")
+        date = context.user_data.get("nl_date", "")
+        time = context.user_data.get("nl_time", "")
+        uid = query.from_user.id
+
+        row = [uid, msg, date, time, repeat, "active", 0]
+        sheet.append_row(row, value_input_option="RAW")
+        context.user_data.clear()
+
+        await safe_edit(
+            query.message,
+            (
+                f"<b>Saved ✓</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"{msg}\n"
+                f"{format_date_short(date)} · {format_time_12h(time)} · {format_repeat(repeat)}"
+            ),
+            home_kb(),
+        )
+
+    # ---- SAVE (repeat choice — step-by-step flow) ----
     elif data.startswith("rep_"):
         repeat = data.replace("rep_", "")
         message = context.user_data.get("message", "")
@@ -677,13 +1015,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             home_kb(),
         )
 
-    # ---- SNOOZE PICKER (show duration options) ----
+    # ---- SNOOZE PICKER ----
     elif data.startswith("snzpick_"):
         row = int(data.replace("snzpick_", ""))
         r = sheet.row_values(row)
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
-        # Guard: only allow if status is pending
         if len(r) > 5 and r[5] != "pending":
             await safe_edit(
                 query.message,
@@ -705,13 +1042,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             snooze_picker_kb(row),
         )
 
-    # ---- SNOOZE BACK (back to Snooze/Done) ----
+    # ---- SNOOZE BACK ----
     elif data.startswith("snzbk_"):
         row = int(data.replace("snzbk_", ""))
         r = sheet.row_values(row)
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
-        # Guard
         if len(r) > 5 and r[5] != "pending":
             await safe_edit(
                 query.message,
@@ -725,14 +1061,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await safe_edit(
             query.message,
-            (
-                f"{msg}\n\n"
-                f"<b>⏰ Reminder</b>"
-            ),
+            f"{msg}\n\n<b>⏰ Reminder</b>",
             reminder_action_kb(row),
         )
 
-    # ---- SNOOZE DO (execute snooze with duration) ----
+    # ---- SNOOZE DO ----
     elif data.startswith("snzdo_"):
         parts = data.replace("snzdo_", "").split("_")
         row = int(parts[0])
@@ -741,7 +1074,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r = sheet.row_values(row)
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
-        # Guard: only allow if status is pending
         if len(r) > 5 and r[5] != "pending":
             await safe_edit(
                 query.message,
@@ -754,18 +1086,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         cancel_retry_jobs(context.job_queue, row)
-
-        # Remove buttons from any previous notification for this row
         await remove_old_reminder_buttons(context, row)
 
         now = datetime.now(IST)
         new_time = now + timedelta(minutes=mins)
-        sheet.update_cell(row, 3, new_time.strftime("%Y-%m-%d"))   # date col
-        sheet.update_cell(row, 4, new_time.strftime("%H:%M"))      # time col
-        sheet.update_cell(row, 6, "active")                        # status col
-        sheet.update_cell(row, 7, 0)                               # retry_count col
+        sheet.update_cell(row, 3, new_time.strftime("%Y-%m-%d"))
+        sheet.update_cell(row, 4, new_time.strftime("%H:%M"))
+        sheet.update_cell(row, 6, "active")
+        sheet.update_cell(row, 7, 0)
 
-        # Clear stored message reference
         context.bot_data.pop(f"rem_msg_{row}", None)
 
         await safe_edit(
@@ -783,7 +1112,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r = sheet.row_values(row)
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
-        # Guard: only allow if status is pending
         if len(r) > 5 and r[5] != "pending":
             await safe_edit(
                 query.message,
@@ -796,16 +1124,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         cancel_retry_jobs(context.job_queue, row)
-
-        # Remove buttons from any previous notification for this row
         await remove_old_reminder_buttons(context, row)
 
         is_repeat = advance_repeat(row, r)
         if not is_repeat:
-            sheet.update_cell(row, 6, "done")       # status col
-            sheet.update_cell(row, 7, 0)             # retry_count col
+            sheet.update_cell(row, 6, "done")
+            sheet.update_cell(row, 7, 0)
 
-        # Clear stored message reference
         context.bot_data.pop(f"rem_msg_{row}", None)
 
         await safe_edit(
@@ -813,7 +1138,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (
                 f"{msg}\n"
                 f"{format_date_short(date_str)} · {format_time_12h(time_str)} · {repeat_str}\n\n"
-                f"<b>Done</b> ✓"
+                f"<b>Done</b> ✅"
             ),
         )
 
@@ -866,7 +1191,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         store_prompt(context.user_data, query.message)
 
-    # ---- EDIT DATE (show calendar) ----
+    # ---- EDIT DATE ----
     elif data.startswith("editdate_"):
         row = int(data.replace("editdate_", ""))
         context.user_data["editing_row"] = row
@@ -928,7 +1253,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        sheet.update_cell(row, 3, new_date)  # date col
+        sheet.update_cell(row, 3, new_date)
         context.user_data.clear()
 
         await safe_edit(
@@ -942,7 +1267,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             home_kb(),
         )
 
-    # ---- EDIT TIME (text input) ----
+    # ---- EDIT TIME ----
     elif data.startswith("edittime_"):
         row = int(data.replace("edittime_", ""))
         context.user_data["editing_row"] = row
@@ -971,10 +1296,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cancel_retry_jobs(context.job_queue, row)
         r = sheet.row_values(row)
         msg, date_str, time_str, repeat_str = reminder_detail(r)
-        sheet.update_cell(row, 6, "cancelled")     # status col
-        sheet.update_cell(row, 7, 0)               # retry_count col
+        sheet.update_cell(row, 6, "cancelled")
+        sheet.update_cell(row, 7, 0)
 
-        # Remove buttons from any pending notification
         await remove_old_reminder_buttons(context, row)
         context.bot_data.pop(f"rem_msg_{row}", None)
 
@@ -1002,7 +1326,95 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if step:
         await _handle_step(update, context, step, text)
-    # No step = ignore (no AI)
+    else:
+        # No active step → try natural language
+        await _try_natural(update, context, text)
+
+
+async def _try_natural(update, context, text):
+    """Try to parse natural language input and create a reminder."""
+    result = parse_natural_text(text)
+
+    if not result:
+        return  # silently ignore
+
+    msg = result['message']
+    date = result['date']
+    time = result['time']
+
+    if not msg:
+        return
+
+    context.user_data.clear()
+
+    # All three found → validate and ask repeat
+    if msg and date and time:
+        if is_past_time(date, time):
+            # Past time today → show calendar to pick different date
+            context.user_data["nl_message"] = msg
+            context.user_data["nl_time"] = time
+            now = datetime.now(IST)
+            sent = await update.message.reply_text(
+                (
+                    f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{msg}\n\n"
+                    f"⚠ {format_time_12h(time)} has already passed today.\n"
+                    f"Pick a future date:"
+                ),
+                reply_markup=build_calendar_kb(now.year, now.month, for_nl=True),
+                parse_mode="HTML",
+            )
+            store_prompt(context.user_data, sent)
+            return
+
+        context.user_data["nl_message"] = msg
+        context.user_data["nl_date"] = date
+        context.user_data["nl_time"] = time
+        sent = await update.message.reply_text(
+            (
+                f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"{msg}\n"
+                f"{format_date_short(date)} · {format_time_12h(time)}\n\nRepeat?"
+            ),
+            reply_markup=nl_repeat_kb(),
+            parse_mode="HTML",
+        )
+        store_prompt(context.user_data, sent)
+
+    # Message + time, no date → show calendar
+    elif msg and time and not date:
+        context.user_data["nl_message"] = msg
+        context.user_data["nl_time"] = time
+        now = datetime.now(IST)
+        sent = await update.message.reply_text(
+            (
+                f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"{msg}\n{format_time_12h(time)}\n\n"
+                f"Pick a date:"
+            ),
+            reply_markup=build_calendar_kb(now.year, now.month, for_nl=True),
+            parse_mode="HTML",
+        )
+        store_prompt(context.user_data, sent)
+
+    # Message + date, no time → ask for time
+    elif msg and date and not time:
+        context.user_data["nl_message"] = msg
+        context.user_data["nl_date"] = date
+        context.user_data["step"] = "nl_time"
+        sent = await update.message.reply_text(
+            (
+                f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"{msg}\n{format_date_short(date)}\n\n"
+                f"Enter time:\n"
+                f"<i>e.g. 9pm, 9:30 PM, 21:30</i>"
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✕ Cancel", callback_data="nlcancel")],
+            ]),
+            parse_mode="HTML",
+        )
+        store_prompt(context.user_data, sent)
 
 
 async def _handle_step(update, context, step, text):
@@ -1046,7 +1458,6 @@ async def _handle_step(update, context, step, text):
             )
             return
 
-        # Valid time — delete the "Enter time:" prompt entirely
         await delete_prompt(context, context.user_data)
 
         context.user_data["time"] = parsed
@@ -1062,6 +1473,45 @@ async def _handle_step(update, context, step, text):
         )
         store_prompt(context.user_data, sent)
 
+    # ---- NL TIME STEP (natural language — date known, need time) ----
+    elif step == "nl_time":
+        parsed = parse_time_input(text)
+        if not parsed:
+            await update.message.reply_text(
+                (
+                    "Invalid time format. Try again:\n"
+                    "<i>e.g. 9pm, 9:30 PM, 21:30, 7:05pm</i>"
+                ),
+                parse_mode="HTML",
+            )
+            return
+
+        date_str = context.user_data.get("nl_date", "")
+
+        if is_past_time(date_str, parsed):
+            await update.message.reply_text(
+                (
+                    f"⚠ {format_time_12h(parsed)} has already passed today.\n"
+                    f"Enter a future time:"
+                ),
+                parse_mode="HTML",
+            )
+            return
+
+        await delete_prompt(context, context.user_data)
+
+        context.user_data["nl_time"] = parsed
+        msg = context.user_data.get("nl_message", "")
+        sent = await update.message.reply_text(
+            (
+                f"<b>New Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"{msg}\n{format_date_short(date_str)} · {format_time_12h(parsed)}\n\nRepeat?"
+            ),
+            reply_markup=nl_repeat_kb(),
+            parse_mode="HTML",
+        )
+        store_prompt(context.user_data, sent)
+
     # ---- EDIT MESSAGE ----
     elif step == "edit_message":
         row = context.user_data.get("editing_row")
@@ -1070,7 +1520,7 @@ async def _handle_step(update, context, step, text):
 
             r = sheet.row_values(row)
             old_msg, date_str, time_str, repeat_str = reminder_detail(r)
-            sheet.update_cell(row, 2, text)  # message col
+            sheet.update_cell(row, 2, text)
             context.user_data.clear()
             await update.message.reply_text(
                 (
@@ -1110,10 +1560,9 @@ async def _handle_step(update, context, step, text):
                 )
                 return
 
-            # Valid time — delete the prompt entirely
             await delete_prompt(context, context.user_data)
 
-            sheet.update_cell(row, 4, parsed)  # time col
+            sheet.update_cell(row, 4, parsed)
             context.user_data.clear()
             await update.message.reply_text(
                 (
@@ -1142,28 +1591,26 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
     if not r:
         return
 
-    # Status is col 6 (0-indexed 5)
     if len(r) <= 5 or r[5] != "pending":
         logger.info(f"auto_retry: row {row} status '{r[5] if len(r) > 5 else '?'}', skipping.")
         return
 
     try:
-        count = int(r[6])  # retry_count col 7 (0-indexed 6)
+        count = int(r[6])
     except (IndexError, ValueError):
         count = 0
 
     if count >= DEFAULT_MAX_RETRIES:
         if not advance_repeat(row, r):
-            sheet.update_cell(row, 6, "missed")     # status col
-            sheet.update_cell(row, 7, 0)             # retry_count col
+            sheet.update_cell(row, 6, "missed")
+            sheet.update_cell(row, 7, 0)
         return
 
-    # Remove buttons from previous notification
     await remove_old_reminder_buttons(context, row)
 
     msg = get_reminder_msg(r)
     new_count = count + 1
-    text = f"{msg}\n\n<b>Reminder</b> ({new_count}/{DEFAULT_MAX_RETRIES})"
+    text = f"{msg}\n\n<b>⏰Reminder</b> ({new_count}/{DEFAULT_MAX_RETRIES})"
 
     sent_msg = await context.bot.send_message(
         chat_id=chat, text=text,
@@ -1172,12 +1619,12 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
 
     store_reminder_msg(context, row, chat, sent_msg.message_id)
 
-    sheet.update_cell(row, 7, new_count)  # retry_count col
+    sheet.update_cell(row, 7, new_count)
 
     if new_count >= DEFAULT_MAX_RETRIES:
         if not advance_repeat(row, r):
-            sheet.update_cell(row, 6, "missed")     # status col
-            sheet.update_cell(row, 7, 0)             # retry_count col
+            sheet.update_cell(row, 6, "missed")
+            sheet.update_cell(row, 7, 0)
     else:
         context.job_queue.run_once(
             auto_retry, DEFAULT_RETRY_INTERVAL,
@@ -1212,12 +1659,10 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
         if len(vals) < 7:
             continue
 
-        # Col 6 (0-indexed 5) = status
         status = str(vals[5]).strip().lower()
         if status != "active":
             continue
 
-        # Col 3 (0-indexed 2) = date, Col 4 (0-indexed 3) = time
         raw_date = str(vals[2]).strip()
         raw_time = str(vals[3]).strip()
         date_val = normalize_date(raw_date)
@@ -1231,19 +1676,16 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
         if date_val != now_date or time_val != now_time:
             continue
 
-        # Col 1 (0-indexed 0) = user_id
         uid = vals[0]
         try:
             uid = int(uid)
         except (ValueError, TypeError):
             pass
 
-        # Col 2 (0-indexed 1) = message
         msg = str(vals[1]).strip()
         logger.info(f"[CRON] FIRING row {idx}: '{msg[:30]}' for {uid}")
 
         cancel_retry_jobs(context.job_queue, idx)
-
         await remove_old_reminder_buttons(context, idx)
 
         text = f"{msg}\n\n<b>⏰ Reminder</b>"
@@ -1258,8 +1700,8 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"[CRON] Send to {uid} failed: {e}")
             continue
 
-        sheet.update_cell(idx, 6, "pending")   # status col
-        sheet.update_cell(idx, 7, 0)           # retry_count col
+        sheet.update_cell(idx, 6, "pending")
+        sheet.update_cell(idx, 7, 0)
 
         context.job_queue.run_once(
             auto_retry, DEFAULT_RETRY_INTERVAL,
@@ -1292,4 +1734,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
