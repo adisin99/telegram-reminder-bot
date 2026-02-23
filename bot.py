@@ -28,7 +28,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ================= CONFIG =================
-TOKEN = "8464632180:AAGh_semPGrVtKBcMFVDy5EvIAl9bzTwcVs"
+TOKEN = "8608586255:AAGneh_XhBMD9hY39eamC15iCK6mGxzSOR0"
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs/edit?pli=1&gid=0#gid=0"
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -292,7 +292,7 @@ def is_past_time(date_str, time_str):
 def get_reminder_msg(r):
     msg = r[3] if len(r) > 3 else ""
     if not msg or not str(msg).strip():
-        msg = r[2] if len(r) > 2 else ""
+        msg = r[1] if len(r) > 2 else ""
     return str(msg).strip()
 
 
@@ -341,10 +341,10 @@ def normalize_time(val):
 
 
 def advance_repeat(row, r):
-    repeat = r[6] if len(r) > 6 else "none"
+    repeat = r[4] if len(r) > 6 else "none"
     if not repeat or repeat == "none":
         return False
-    d = datetime.strptime(normalize_date(r[4]), "%Y-%m-%d")
+    d = datetime.strptime(normalize_date(r[2]), "%Y-%m-%d")
     if repeat == "daily":
         nd = d + timedelta(days=1)
     elif repeat == "weekly":
@@ -409,9 +409,9 @@ def status_label(status):
 
 def reminder_detail(r):
     msg = get_reminder_msg(r)
-    date_str = normalize_date(r[4]) if len(r) > 4 else ""
-    time_str = normalize_time(r[5]) if len(r) > 5 else ""
-    repeat_str = format_repeat(r[6]) if len(r) > 6 else ""
+    date_str = normalize_date(r[2]) if len(r) > 4 else ""
+    time_str = normalize_time(r[3]) if len(r) > 5 else ""
+    repeat_str = format_repeat(r[4]) if len(r) > 6 else ""
     return msg, date_str, time_str, repeat_str
 
 
@@ -689,7 +689,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
         # Guard: only allow if status is pending
-        if len(r) > 7 and r[7] != "pending":
+        if len(r) > 7 and r[5] != "pending":
             await safe_edit(
                 query.message,
                 (
@@ -717,7 +717,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
         # Guard
-        if len(r) > 7 and r[7] != "pending":
+        if len(r) > 7 and r[5] != "pending":
             await safe_edit(
                 query.message,
                 (
@@ -747,7 +747,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
         # Guard: only allow if status is pending
-        if len(r) > 7 and r[7] != "pending":
+        if len(r) > 7 and r[5] != "pending":
             await safe_edit(
                 query.message,
                 (
@@ -789,7 +789,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
         # Guard: only allow if status is pending
-        if len(r) > 7 and r[7] != "pending":
+        if len(r) > 7 and r[5] != "pending":
             await safe_edit(
                 query.message,
                 (
@@ -818,7 +818,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (
                 f"{msg}\n"
                 f"{format_date_short(date_str)} · {format_time_12h(time_str)} · {repeat_str}\n\n"
-                f"<b>Done</b> ✔️"
+                f"<b>Done</b> ✅"
             ),
         )
 
@@ -1143,12 +1143,12 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
     if not r:
         return
 
-    if r[7] != "pending":
-        logger.info(f"auto_retry: row {row} status '{r[7]}', skipping.")
+    if r[5] != "pending":
+        logger.info(f"auto_retry: row {row} status '{r[5]}', skipping.")
         return
 
     try:
-        count = int(r[8])
+        count = int(r[6])
     except (IndexError, ValueError):
         count = 0
 
@@ -1293,4 +1293,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
