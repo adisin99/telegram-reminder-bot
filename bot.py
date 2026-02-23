@@ -37,15 +37,13 @@ DEFAULT_RETRY_INTERVAL = 600  # 10 minutes
 DEFAULT_MAX_RETRIES = 3
 
 # Sheet columns (1-indexed):
-# 1: id (empty)
-# 2: user_id
-# 3: title (legacy, now empty)
-# 4: message
-# 5: date
-# 6: time
-# 7: repeat
-# 8: status
-# 9: retries
+# 1: user_id
+# 2: message
+# 3: date
+# 4: time
+# 5: repeat
+# 6: status
+# 7: retry_count
 
 # =============== LOGGING =================
 logging.basicConfig(
@@ -217,7 +215,6 @@ def build_calendar_kb(year, month, for_edit=None):
     nav_row.append(InlineKeyboardButton("›", callback_data=f"{nav_prefix}{next_y}_{next_m:02d}"))
     kb.append(nav_row)
 
-    # Cancel or Back at bottom
     if for_edit:
         kb.append([InlineKeyboardButton("« Back", callback_data=f"edit_{for_edit}")])
     else:
@@ -290,9 +287,8 @@ def is_past_time(date_str, time_str):
 # ============= HELPERS ====================
 
 def get_reminder_msg(r):
-    msg = r[3] if len(r) > 3 else ""
-    if not msg or not str(msg).strip():
-        msg = r[1] if len(r) > 2 else ""
+    """Get message from row. Col 2 (index 1) = message."""
+    msg = r[1] if len(r) > 1 else ""
     return str(msg).strip()
 
 
@@ -341,7 +337,9 @@ def normalize_time(val):
 
 
 def advance_repeat(row, r):
-    repeat = r[4] if len(r) > 6 else "none"
+    """Advance to next occurrence for repeating reminders.
+    r is 0-indexed list. Col 5 (idx 4) = repeat, Col 3 (idx 2) = date."""
+    repeat = r[4] if len(r) > 4 else "none"
     if not repeat or repeat == "none":
         return False
     d = datetime.strptime(normalize_date(r[2]), "%Y-%m-%d")
@@ -358,9 +356,9 @@ def advance_repeat(row, r):
         nd = d.replace(year=y, month=m)
     else:
         return False
-    sheet.update_cell(row, 5, nd.strftime("%Y-%m-%d"))
-    sheet.update_cell(row, 8, "active")
-    sheet.update_cell(row, 9, 0)
+    sheet.update_cell(row, 3, nd.strftime("%Y-%m-%d"))   # date col
+    sheet.update_cell(row, 6, "active")                   # status col
+    sheet.update_cell(row, 7, 0)                          # retry_count col
     return True
 
 
@@ -408,10 +406,12 @@ def status_label(status):
 
 
 def reminder_detail(r):
+    """Extract display fields from 0-indexed row list.
+    idx 1=message, 2=date, 3=time, 4=repeat"""
     msg = get_reminder_msg(r)
-    date_str = normalize_date(r[2]) if len(r) > 4 else ""
-    time_str = normalize_time(r[3]) if len(r) > 5 else ""
-    repeat_str = format_repeat(r[4]) if len(r) > 6 else ""
+    date_str = normalize_date(r[2]) if len(r) > 2 else ""
+    time_str = normalize_time(r[3]) if len(r) > 3 else ""
+    repeat_str = format_repeat(r[4]) if len(r) > 4 else ""
     return msg, date_str, time_str, repeat_str
 
 
@@ -442,7 +442,6 @@ async def remove_prompt_kb(context, user_data):
 
 # ============= DELETE PROMPT ==============
 async def delete_prompt(context, user_data):
-    """Delete the stored prompt message entirely."""
     msg_id = user_data.get("prompt_msg_id")
     chat_id = user_data.get("prompt_chat_id")
     if msg_id and chat_id:
@@ -461,13 +460,11 @@ def store_prompt(user_data, message):
 
 
 # ============= REMOVE OLD REMINDER BUTTONS =
-async def remove_old_reminder_buttons(context, row, msg_text=None):
-    """Remove Snooze/Done buttons from the previous notification for this row."""
+async def remove_old_reminder_buttons(context, row):
     key = f"rem_msg_{row}"
     prev = context.bot_data.get(key)
     if prev:
         try:
-            # Edit old message to remove buttons (keep text as-is)
             await context.bot.edit_message_reply_markup(
                 chat_id=prev["chat_id"],
                 message_id=prev["msg_id"],
@@ -479,13 +476,13 @@ async def remove_old_reminder_buttons(context, row, msg_text=None):
 
 
 def store_reminder_msg(context, row, chat_id, msg_id):
-    """Store the latest notification message for a row."""
     context.bot_data[f"rem_msg_{row}"] = {"chat_id": chat_id, "msg_id": msg_id}
 
 
 # ============= POST INIT =================
 async def post_init(application):
     await application.bot.set_my_commands([
+        BotCommand("start", "Start the bot"),
         BotCommand("add", "New reminder"),
         BotCommand("list", "All reminders"),
         BotCommand("info", "About this bot"),
@@ -573,8 +570,6 @@ async def show_list(target, uid, is_new_message=False):
         time_str = normalize_time(r.get("time", ""))
         repeat_str = format_repeat(r.get("repeat", "none"))
         msg = str(r.get("message", ""))
-        if not msg.strip():
-            msg = str(r.get("title", ""))
         msg_short = msg[:40] + "…" if len(msg) > 40 else msg
         btn_label = msg[:12] if len(msg) > 12 else msg
 
@@ -669,7 +664,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = context.user_data.get("message", "")
         date = context.user_data.get("date", "")
         time = context.user_data.get("time", "")
-        row = ["", query.from_user.id, "", message, date, time, repeat, "active", 0]
+        row = [query.from_user.id, message, date, time, repeat, "active", 0]
         sheet.append_row(row, value_input_option="RAW")
         context.user_data.clear()
         await safe_edit(
@@ -689,7 +684,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
         # Guard: only allow if status is pending
-        if len(r) > 7 and r[5] != "pending":
+        if len(r) > 5 and r[5] != "pending":
             await safe_edit(
                 query.message,
                 (
@@ -717,7 +712,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
         # Guard
-        if len(r) > 7 and r[5] != "pending":
+        if len(r) > 5 and r[5] != "pending":
             await safe_edit(
                 query.message,
                 (
@@ -747,7 +742,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
         # Guard: only allow if status is pending
-        if len(r) > 7 and r[5] != "pending":
+        if len(r) > 5 and r[5] != "pending":
             await safe_edit(
                 query.message,
                 (
@@ -765,10 +760,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         now = datetime.now(IST)
         new_time = now + timedelta(minutes=mins)
-        sheet.update_cell(row, 5, new_time.strftime("%Y-%m-%d"))
-        sheet.update_cell(row, 6, new_time.strftime("%H:%M"))
-        sheet.update_cell(row, 8, "active")
-        sheet.update_cell(row, 9, 0)
+        sheet.update_cell(row, 3, new_time.strftime("%Y-%m-%d"))   # date col
+        sheet.update_cell(row, 4, new_time.strftime("%H:%M"))      # time col
+        sheet.update_cell(row, 6, "active")                        # status col
+        sheet.update_cell(row, 7, 0)                               # retry_count col
 
         # Clear stored message reference
         context.bot_data.pop(f"rem_msg_{row}", None)
@@ -789,7 +784,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg, date_str, time_str, repeat_str = reminder_detail(r)
 
         # Guard: only allow if status is pending
-        if len(r) > 7 and r[5] != "pending":
+        if len(r) > 5 and r[5] != "pending":
             await safe_edit(
                 query.message,
                 (
@@ -807,8 +802,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         is_repeat = advance_repeat(row, r)
         if not is_repeat:
-            sheet.update_cell(row, 8, "done")
-            sheet.update_cell(row, 9, 0)
+            sheet.update_cell(row, 6, "done")       # status col
+            sheet.update_cell(row, 7, 0)             # retry_count col
 
         # Clear stored message reference
         context.bot_data.pop(f"rem_msg_{row}", None)
@@ -933,7 +928,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        sheet.update_cell(row, 5, new_date)
+        sheet.update_cell(row, 3, new_date)  # date col
         context.user_data.clear()
 
         await safe_edit(
@@ -976,8 +971,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cancel_retry_jobs(context.job_queue, row)
         r = sheet.row_values(row)
         msg, date_str, time_str, repeat_str = reminder_detail(r)
-        sheet.update_cell(row, 8, "cancelled")
-        sheet.update_cell(row, 9, 0)
+        sheet.update_cell(row, 6, "cancelled")     # status col
+        sheet.update_cell(row, 7, 0)               # retry_count col
 
         # Remove buttons from any pending notification
         await remove_old_reminder_buttons(context, row)
@@ -1005,8 +1000,12 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
     text = update.message.text.strip()
 
-    if not step:
-        return
+    if step:
+        await _handle_step(update, context, step, text)
+    # No step = ignore (no AI)
+
+
+async def _handle_step(update, context, step, text):
 
     # ---- MESSAGE STEP ----
     if step == "message":
@@ -1071,7 +1070,7 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             r = sheet.row_values(row)
             old_msg, date_str, time_str, repeat_str = reminder_detail(r)
-            sheet.update_cell(row, 4, text)
+            sheet.update_cell(row, 2, text)  # message col
             context.user_data.clear()
             await update.message.reply_text(
                 (
@@ -1114,7 +1113,7 @@ async def save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Valid time — delete the prompt entirely
             await delete_prompt(context, context.user_data)
 
-            sheet.update_cell(row, 6, parsed)
+            sheet.update_cell(row, 4, parsed)  # time col
             context.user_data.clear()
             await update.message.reply_text(
                 (
@@ -1143,19 +1142,20 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
     if not r:
         return
 
-    if r[5] != "pending":
-        logger.info(f"auto_retry: row {row} status '{r[5]}', skipping.")
+    # Status is col 6 (0-indexed 5)
+    if len(r) <= 5 or r[5] != "pending":
+        logger.info(f"auto_retry: row {row} status '{r[5] if len(r) > 5 else '?'}', skipping.")
         return
 
     try:
-        count = int(r[6])
+        count = int(r[6])  # retry_count col 7 (0-indexed 6)
     except (IndexError, ValueError):
         count = 0
 
     if count >= DEFAULT_MAX_RETRIES:
         if not advance_repeat(row, r):
-            sheet.update_cell(row, 8, "missed")
-            sheet.update_cell(row, 9, 0)
+            sheet.update_cell(row, 6, "missed")     # status col
+            sheet.update_cell(row, 7, 0)             # retry_count col
         return
 
     # Remove buttons from previous notification
@@ -1170,15 +1170,14 @@ async def auto_retry(context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reminder_action_kb(row), parse_mode="HTML",
     )
 
-    # Store new message reference
     store_reminder_msg(context, row, chat, sent_msg.message_id)
 
-    sheet.update_cell(row, 9, new_count)
+    sheet.update_cell(row, 7, new_count)  # retry_count col
 
     if new_count >= DEFAULT_MAX_RETRIES:
         if not advance_repeat(row, r):
-            sheet.update_cell(row, 8, "missed")
-            sheet.update_cell(row, 9, 0)
+            sheet.update_cell(row, 6, "missed")     # status col
+            sheet.update_cell(row, 7, 0)             # retry_count col
     else:
         context.job_queue.run_once(
             auto_retry, DEFAULT_RETRY_INTERVAL,
@@ -1210,15 +1209,17 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
         return
 
     for idx, vals in enumerate(all_vals[1:], start=2):
-        if len(vals) < 9:
+        if len(vals) < 7:
             continue
 
-        status = str(vals[7]).strip().lower()
+        # Col 6 (0-indexed 5) = status
+        status = str(vals[5]).strip().lower()
         if status != "active":
             continue
 
-        raw_date = str(vals[4]).strip()
-        raw_time = str(vals[5]).strip()
+        # Col 3 (0-indexed 2) = date, Col 4 (0-indexed 3) = time
+        raw_date = str(vals[2]).strip()
+        raw_time = str(vals[3]).strip()
         date_val = normalize_date(raw_date)
         time_val = normalize_time(raw_time)
 
@@ -1230,20 +1231,19 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
         if date_val != now_date or time_val != now_time:
             continue
 
-        uid = vals[1]
+        # Col 1 (0-indexed 0) = user_id
+        uid = vals[0]
         try:
             uid = int(uid)
         except (ValueError, TypeError):
             pass
 
-        msg = str(vals[3]).strip()
-        if not msg:
-            msg = str(vals[2]).strip()
+        # Col 2 (0-indexed 1) = message
+        msg = str(vals[1]).strip()
         logger.info(f"[CRON] FIRING row {idx}: '{msg[:30]}' for {uid}")
 
         cancel_retry_jobs(context.job_queue, idx)
 
-        # Remove buttons from any previous notification for this row
         await remove_old_reminder_buttons(context, idx)
 
         text = f"{msg}\n\n<b>⏰ Reminder</b>"
@@ -1253,14 +1253,13 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=uid, text=text,
                 reply_markup=reminder_action_kb(idx), parse_mode="HTML",
             )
-            # Store message reference so we can remove buttons later
             store_reminder_msg(context, idx, uid, sent_msg.message_id)
         except Exception as e:
             logger.error(f"[CRON] Send to {uid} failed: {e}")
             continue
 
-        sheet.update_cell(idx, 8, "pending")
-        sheet.update_cell(idx, 9, 0)
+        sheet.update_cell(idx, 6, "pending")   # status col
+        sheet.update_cell(idx, 7, 0)           # retry_count col
 
         context.job_queue.run_once(
             auto_retry, DEFAULT_RETRY_INTERVAL,
@@ -1293,5 +1292,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
