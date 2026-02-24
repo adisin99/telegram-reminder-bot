@@ -181,7 +181,6 @@ def advance_rep(row, r):
     else:
         return False
     sheet.update_cell(row, 3, nd.strftime("%Y-%m-%d"))
-    # Time stays unchanged — snooze doesn't affect recurring schedule
     sheet.update_cell(row, 6, "active")
     sheet.update_cell(row, 7, 0)
     return True
@@ -195,7 +194,6 @@ def kill_jobs(jq, row):
 
 
 def do_save(uid, ud, msg, date, time, rep):
-    """Save reminder to sheet and clear user_data."""
     sheet.append_row([uid, msg, date, time, rep, "active", 0], value_input_option="RAW")
     ud.clear()
 
@@ -417,7 +415,7 @@ def _clean(text, spans):
     r = text
     for s, e in sorted_spans:
         r = r[:s] + r[e:]
-    for f in [r'^\s*remind\s+me\s+to\s+', r'^\s*reminder\s+to\s+', r'^\s*reminder\s+',
+    for f in [r'^\s*remind\s+me\s+to\s+', r'^\s*reminder\s+to\s+', r'^\s*reminder\s+', r'^\s*remind\s+to\s+',
               r'^\s*remind\s+me\s+', r'^\s*remember\s+to\s+', r"^\s*don'?t\s+forget\s+to\s+",
               r'^\s*set\s+(?:a\s+)?reminder\s+(?:to\s+|for\s+)?']:
         r = re.sub(f, '', r, flags=re.I)
@@ -439,7 +437,6 @@ def parse_nl(text):
     r_sp = (rr[1], rr[2]) if rr else None
     msg = _clean(text, [t_sp, d_sp, r_sp])
     if not msg or not ts:
-        # Need at least message + time to trigger NL
         return None
     return {'message': msg, 'date': ds, 'time': ts, 'repeat': rep}
 
@@ -488,6 +485,21 @@ def save_rm(ctx, row, cid, mid):
     ctx.bot_data[f"r_{row}"] = {"c": cid, "m": mid}
 
 
+async def rm_home(ctx, ud):
+    """Remove +New button from the previous home message."""
+    mid, cid = ud.pop("h_mid", None), ud.pop("h_cid", None)
+    if mid and cid:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=cid, message_id=mid, reply_markup=None)
+        except Exception:
+            pass
+
+
+def save_home(ud, msg):
+    """Track the home message so we can remove its +New button later."""
+    ud["h_mid"], ud["h_cid"] = msg.message_id, msg.chat.id
+
+
 # ============= POST INIT =================
 
 async def post_init(app):
@@ -500,11 +512,14 @@ async def post_init(app):
 # ============= COMMANDS ===================
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await rm_home(ctx, ctx.user_data)
     ctx.user_data.clear()
-    await update.message.reply_text(home_text(), reply_markup=home_kb(), parse_mode="HTML")
+    sent = await update.message.reply_text(home_text(), reply_markup=home_kb(), parse_mode="HTML")
+    save_home(ctx.user_data, sent)
 
 
 async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await rm_home(ctx, ctx.user_data)
     ctx.user_data.clear()
     ctx.user_data["step"] = "message"
     sent = await update.message.reply_text(
@@ -513,8 +528,9 @@ async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await rm_home(ctx, ctx.user_data)
     ctx.user_data.clear()
-    await show_list(update.message, update.effective_user.id, new=True)
+    await show_list(update.message, update.effective_user.id, ctx.user_data, new=True)
 
 
 async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -537,7 +553,7 @@ async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ============= SHOW LIST =================
 
-async def show_list(target, uid, new=False):
+async def show_list(target, uid, ud, new=False):
     rows = sheet.get_all_records()
     items = [(i, r) for i, r in enumerate(rows, 2)
              if str(r.get("user_id", "")) == str(uid)
@@ -545,28 +561,35 @@ async def show_list(target, uid, new=False):
 
     if not items:
         t = f"{hdr('Reminders')}\nNo reminders found."
+        kb = home_kb()
         if new:
-            await target.reply_text(t, reply_markup=home_kb(), parse_mode="HTML")
+            sent = await target.reply_text(t, reply_markup=kb, parse_mode="HTML")
+            save_home(ud, sent)
         else:
-            await safe_edit(target, t, home_kb())
+            await safe_edit(target, t, kb)
         return
 
     lines = [hdr("Reminders")]
     btns = []
-    for ri, r in items:
+    for idx, (ri, r) in enumerate(items, 1):
         st = str(r.get("status", ""))
         msg = str(r.get("message", ""))
-        short = msg[:40] + "…" if len(msg) > 40 else msg
-        bl = msg[:12] if len(msg) > 12 else msg
+        short = msg[:30] + "…" if len(msg) > 30 else msg
         lines.append(
-            f"\n{s_icon(st)} {short}\n   {fmt_date(norm_date(r.get('date', '')))} · "
-            f"{fmt_time(norm_time(r.get('time', '')))} · "
-            f"{fmt_rep(r.get('repeat', 'none'))} · <i>{s_label(st)}</i>")
-        if st == "missed":
-            btns.append([InlineKeyboardButton(f"✕ {bl}", callback_data=f"crem_{ri}")])
-        else:
-            btns.append([InlineKeyboardButton(f"✎ {bl}", callback_data=f"edit_{ri}"),
-                         InlineKeyboardButton(f"✕ {bl}", callback_data=f"crem_{ri}")])
+            f"\n<b>{idx}</b> {s_icon(st)} {short}\n"
+            f"   {fmt_date(norm_date(r.get('date', '')))} · "
+            f"{fmt_time(norm_time(r.get('time', '')))}")
+
+    # Number buttons in rows of 5
+    num_row = []
+    for idx, (ri, r) in enumerate(items, 1):
+        num_row.append(InlineKeyboardButton(str(idx), callback_data=f"view_{ri}"))
+        if len(num_row) == 5:
+            btns.append(num_row)
+            num_row = []
+    if num_row:
+        btns.append(num_row)
+
     btns.append([InlineKeyboardButton("« Back", callback_data="home")])
     t = "\n".join(lines)
     if new:
@@ -578,7 +601,6 @@ async def show_list(target, uid, new=False):
 # ============= SAVE OR ASK REPEAT ========
 
 async def finish_or_repeat(target, uid, ud, msg, date, time, edit_msg=False):
-    """If repeat already known (from NL), save directly. Otherwise ask."""
     rep = ud.get("repeat")
     if rep:
         do_save(uid, ud, msg, date, time, rep)
@@ -586,7 +608,8 @@ async def finish_or_repeat(target, uid, ud, msg, date, time, edit_msg=False):
         if edit_msg:
             await safe_edit(target, txt, home_kb())
         else:
-            await target.reply_text(txt, reply_markup=home_kb(), parse_mode="HTML")
+            sent = await target.reply_text(txt, reply_markup=home_kb(), parse_mode="HTML")
+            save_home(ud, sent)
     else:
         ud["step"] = "repeat"
         txt = f"{hdr('New Reminder')}\n{detail(msg, date, time)}\n\nRepeat?"
@@ -607,11 +630,18 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         return
 
-    if data in ("home", "cancel"):
+    if data == "home":
         ud.clear()
         await safe_edit(q.message, home_text(), home_kb())
+        save_home(ud, q.message)
+
+    elif data == "cancel":
+        ud.clear()
+        await safe_edit(q.message, home_text(), home_kb())
+        save_home(ud, q.message)
 
     elif data == "add":
+        await rm_home(ctx, ud)
         ud.clear()
         ud["step"] = "message"
         sent = await q.message.reply_text(
@@ -658,6 +688,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await safe_edit(q.message,
                 f"{hdr('Updated ✓')}\n{msg}\nDate: {fmt_date(old_d)} → <b>{fmt_date(date_str)}</b>\n"
                 f"Time: {fmt_time(ts)} · {rs}", home_kb())
+            save_home(ud, q.message)
         else:
             ud["date"] = date_str
             msg = ud.get("message", "")
@@ -684,6 +715,27 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         do_save(q.from_user.id, ud, msg, date, time, rep)
         await safe_edit(q.message,
             f"{hdr('Saved ✓')}\n{detail(msg, date, time, fmt_rep(rep))}", home_kb())
+        save_home(ud, q.message)
+
+    # ---- VIEW REMINDER DETAIL ----
+    elif data.startswith("view_"):
+        row = int(data[5:])
+        r = sheet.row_values(row)
+        msg, ds, ts, rs = get_detail(r)
+        st = r[5] if len(r) > 5 else "active"
+        btns = []
+        if st != "missed":
+            btns.append([
+                InlineKeyboardButton("✎ Edit", callback_data=f"edit_{row}"),
+                InlineKeyboardButton("✕ Cancel", callback_data=f"crem_{row}")])
+        else:
+            btns.append([InlineKeyboardButton("✕ Remove", callback_data=f"crem_{row}")])
+        btns.append([InlineKeyboardButton("« Back", callback_data="list_refresh")])
+        await safe_edit(q.message,
+            f"{hdr('Reminder')}\n{msg}\n\n"
+            f"{fmt_date(ds)} · {fmt_time(ts)}\n"
+            f"{rs} · {s_icon(st)} <i>{s_label(st)}</i>",
+            InlineKeyboardMarkup(btns))
 
     # ---- SNOOZE PICKER ----
     elif data.startswith("snzp_"):
@@ -718,14 +770,11 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rep = r[4] if len(r) > 4 else "none"
 
         if rep and rep != "none":
-            # REPEAT reminder: don't change date/time in sheet
-            # Schedule one-time snooze job, mark as "snoozed"
             sheet.update_cell(row, 6, "snoozed")
             sheet.update_cell(row, 7, 0)
             ctx.job_queue.run_once(snooze_fire, mins * 60,
                 data={"row": row, "chat": q.from_user.id}, name=f"snooze-{row}")
         else:
-            # ONE-TIME reminder: update date/time as before
             sheet.update_cell(row, 3, nt.strftime("%Y-%m-%d"))
             sheet.update_cell(row, 4, nt.strftime("%H:%M"))
             sheet.update_cell(row, 6, "active")
@@ -763,7 +812,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"),
                  InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
                  InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
-                [InlineKeyboardButton("« Back", callback_data="list_refresh")]]))
+                [InlineKeyboardButton("« Back", callback_data=f"view_{row}")]]))
 
     elif data.startswith("emsg_"):
         row = int(data[5:])
@@ -808,10 +857,11 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await rm_btns(ctx, row)
         ctx.bot_data.pop(f"r_{row}", None)
         await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\n<b>Cancelled</b> ✕", home_kb())
+        save_home(ud, q.message)
 
     elif data == "list_refresh":
         ud.clear()
-        await show_list(q.message, q.from_user.id)
+        await show_list(q.message, q.from_user.id, ud)
 
 
 # ============= TEXT HANDLER ===============
@@ -837,18 +887,17 @@ async def _try_nl(update, ctx, text):
         return
 
     ud = ctx.user_data
+    await rm_home(ctx, ud)
     ud.clear()
     ud["message"] = msg
     ud["time"] = time
     if rep:
         ud["repeat"] = rep
 
-    # Default date to today if not specified
     if not date:
         date = datetime.now(IST).strftime("%Y-%m-%d")
 
     if is_past(date, time):
-        # Time passed today — ask user to pick a future date
         ud["step"] = "date"
         now = datetime.now(IST)
         sent = await update.message.reply_text(
@@ -895,10 +944,11 @@ async def _do_step(update, ctx, step, text):
         old, ds, ts, rs = get_detail(r)
         sheet.update_cell(row, 2, text)
         ud.clear()
-        await update.message.reply_text(
+        sent = await update.message.reply_text(
             f"{hdr('Updated ✓')}\nMessage: {old} → <b>{text}</b>\n"
             f"{fmt_date(ds)} · {fmt_time(ts)} · {rs}",
             reply_markup=home_kb(), parse_mode="HTML")
+        save_home(ud, sent)
 
     elif step == "edit_time":
         row = ud.get("editing_row")
@@ -916,16 +966,16 @@ async def _do_step(update, ctx, step, text):
         await del_prompt(ctx, ud)
         sheet.update_cell(row, 4, parsed)
         ud.clear()
-        await update.message.reply_text(
+        sent = await update.message.reply_text(
             f"{hdr('Updated ✓')}\n{msg}\nDate: {fmt_date(ds)}\n"
             f"Time: {fmt_time(old_t)} → <b>{fmt_time(parsed)}</b> · {rs}",
             reply_markup=home_kb(), parse_mode="HTML")
+        save_home(ud, sent)
 
 
 # ============= SNOOZE FIRE ================
 
 async def snooze_fire(ctx: ContextTypes.DEFAULT_TYPE):
-    """Fires a snoozed repeat reminder without changing its original schedule."""
     row = ctx.job.data["row"]
     chat = ctx.job.data["chat"]
     try:
@@ -935,7 +985,6 @@ async def snooze_fire(ctx: ContextTypes.DEFAULT_TYPE):
         return
     if not r or len(r) <= 5:
         return
-    # Only fire if still snoozed
     if r[5] != "snoozed":
         return
 
@@ -981,7 +1030,7 @@ async def auto_retry(ctx: ContextTypes.DEFAULT_TYPE):
     await rm_btns(ctx, row)
     nc = count + 1
     sent = await ctx.bot.send_message(chat_id=chat,
-        text=f"{str(r[1]).strip()}\n\n<b>⏰Reminder</b> ({nc}/{MAX_RETRIES})",
+        text=f"{str(r[1]).strip()}\n\n<b>Reminder</b> ({nc}/{MAX_RETRIES})",
         reply_markup=act_kb(row), parse_mode="HTML")
     save_rm(ctx, row, chat, sent.message_id)
     sheet.update_cell(row, 7, nc)
