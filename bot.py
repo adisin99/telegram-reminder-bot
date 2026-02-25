@@ -34,20 +34,12 @@ SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9S
 IST = pytz.timezone("Asia/Kolkata")
 DIV = "━━━━━━━━━━━━━━━━━━━━"
 
-# Defaults (overridden per-user via settings)
 DEF_RETRIES = 3
 DEF_RETRY_GAP = 10  # minutes
 DEF_DIGEST_TIME = "07:00"
 
 # Sheet1: user_id | message | date | time | repeat | status | retry_count
-# Sheet2: user_id | emoji | message | time | repeat
-# Sheet3: user_id | digest_on | digest_time | max_retries | retry_gap
-
-EMOJIS = [
-    ("💊", "Health"), ("💼", "Work"), ("🏋️", "Fitness"), ("📞", "Call"),
-    ("🛒", "Shopping"), ("💰", "Finance"), ("📚", "Study"), ("🏠", "Home"),
-    ("✈️", "Travel"), ("📝", "General"),
-]
+# Sheet2: user_id | digest_on | digest_time | max_retries | retry_gap
 
 # =============== LOGGING =================
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -62,7 +54,6 @@ credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(creds_
 client = gspread.authorize(credentials)
 workbook = client.open_by_url(SHEET_URL)
 
-# Get or create sheets
 def get_or_create_sheet(name, headers):
     try:
         ws = workbook.worksheet(name)
@@ -72,7 +63,6 @@ def get_or_create_sheet(name, headers):
     return ws
 
 sheet = get_or_create_sheet("Reminders", ["user_id", "message", "date", "time", "repeat", "status", "retry_count"])
-tpl_sheet = get_or_create_sheet("Templates", ["user_id", "emoji", "message", "time", "repeat"])
 cfg_sheet = get_or_create_sheet("Settings", ["user_id", "digest_on", "digest_time", "max_retries", "retry_gap"])
 
 
@@ -154,7 +144,6 @@ def norm_time(val):
 # ============= SETTINGS HELPERS ===========
 
 def get_cfg(uid):
-    """Get user settings, create defaults if missing."""
     uid_s = str(uid)
     try:
         rows = cfg_sheet.get_all_values()
@@ -171,14 +160,11 @@ def get_cfg(uid):
                 "digest_time": norm_time(r[2]) if r[2] else DEF_DIGEST_TIME,
                 "max_retries": int(r[3]) if r[3] else DEF_RETRIES,
                 "retry_gap": int(r[4]) if r[4] else DEF_RETRY_GAP,
-                "_row": i,
             }
-    # Create default
     cfg_sheet.append_row([uid_s, "true", DEF_DIGEST_TIME, DEF_RETRIES, DEF_RETRY_GAP], value_input_option="RAW")
     return {"digest_on": True, "digest_time": DEF_DIGEST_TIME, "max_retries": DEF_RETRIES, "retry_gap": DEF_RETRY_GAP}
 
 def get_cfg_row(uid):
-    """Find the row number for this user in settings."""
     uid_s = str(uid)
     try:
         rows = cfg_sheet.get_all_values()
@@ -190,10 +176,9 @@ def get_cfg_row(uid):
     return None
 
 def save_cfg(uid, field, value):
-    """Update a single settings field."""
     row = get_cfg_row(uid)
     if not row:
-        get_cfg(uid)  # creates default
+        get_cfg(uid)
         row = get_cfg_row(uid)
     if not row:
         return
@@ -511,7 +496,6 @@ async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("add", "New reminder"),
         BotCommand("list", "All reminders"),
-        BotCommand("templates", "Saved templates"),
         BotCommand("settings", "Bot settings"),
         BotCommand("info", "About this bot")])
 
@@ -521,7 +505,6 @@ async def post_init(app):
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await rm_home(ctx, ctx.user_data)
     ctx.user_data.clear()
-    # Ensure user has settings row
     get_cfg(update.effective_user.id)
     sent = await update.message.reply_text(home_text(), reply_markup=home_kb(), parse_mode="HTML")
     save_home(ctx.user_data, sent)
@@ -546,13 +529,13 @@ async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "<b>Features</b>\n• One-time & recurring reminders\n• Calendar date picker\n"
         "• Flexible time input\n• Snooze (15m to 12h)\n"
         "• Auto-retry if missed\n• Edit or cancel anytime\n"
-        "• Reusable templates\n• Daily morning digest\n• Customisable settings\n\n"
+        "• Daily morning digest\n• Customisable settings\n\n"
         "<b>Smart Input</b>\nJust type naturally:\n"
         "<code>Buy milk tomorrow at 5pm</code>\n"
         "<code>Call mom at 3:30pm</code>\n"
         "<code>Meeting on Monday at 10am weekly</code>\n\n"
         "<b>Commands</b>\n/add — New reminder\n/list — All reminders\n"
-        "/templates — Saved templates\n/settings — Bot settings\n/info — This page\n\n"
+        "/settings — Bot settings\n/info — This page\n\n"
         "<b>Time Formats</b>\n"
         "<code>9pm</code>  <code>9:30 PM</code>  <code>21:30</code>  <code>7:05pm</code>",
         parse_mode="HTML")
@@ -584,57 +567,6 @@ async def show_settings(target, uid, new=False):
         await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
     else:
         await safe_edit(target, txt, InlineKeyboardMarkup(btns))
-
-
-# ============= TEMPLATES ==================
-
-async def templates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await rm_home(ctx, ctx.user_data)
-    ctx.user_data.clear()
-    await show_templates(update.message, update.effective_user.id, ctx.user_data, new=True)
-
-async def show_templates(target, uid, ud, new=False):
-    uid_s = str(uid)
-    try:
-        rows = tpl_sheet.get_all_values()
-    except Exception:
-        try:
-            client.login()
-            rows = tpl_sheet.get_all_values()
-        except Exception:
-            rows = []
-    items = [(i, r) for i, r in enumerate(rows[1:], 2) if str(r[0]) == uid_s]
-
-    if not items:
-        txt = f"{hdr('Templates')}\nNo templates yet.\nSave frequent reminders as templates!"
-        btns = [[InlineKeyboardButton("＋ Create", callback_data="tpl_add")],
-                [InlineKeyboardButton("« Back", callback_data="home")]]
-        if new:
-            await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
-        else:
-            await safe_edit(target, txt, InlineKeyboardMarkup(btns))
-        return
-
-    lines = [hdr("Templates")]
-    num_btns = []
-    for idx, (ri, r) in enumerate(items, 1):
-        emoji = r[1] if len(r) > 1 else "📝"
-        msg = str(r[2]) if len(r) > 2 else ""
-        ts = fmt_time(norm_time(r[3])) if len(r) > 3 else ""
-        rep = fmt_rep(r[4]) if len(r) > 4 else ""
-        short = msg[:25] + "…" if len(msg) > 25 else msg
-        lines.append(f"\n<b>{idx}</b> {emoji} {short}\n   {ts} · {rep}")
-        num_btns.append(InlineKeyboardButton(str(idx), callback_data=f"tplv_{ri}"))
-
-    btn_rows = [num_btns[i:i+5] for i in range(0, len(num_btns), 5)]
-    btn_rows.append([InlineKeyboardButton("＋ Create", callback_data="tpl_add")])
-    btn_rows.append([InlineKeyboardButton("« Back", callback_data="home")])
-
-    txt = "\n".join(lines)
-    if new:
-        await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btn_rows), parse_mode="HTML")
-    else:
-        await safe_edit(target, txt, InlineKeyboardMarkup(btn_rows))
 
 
 # ============= SHOW LIST =================
@@ -883,7 +815,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             sheet.update_cell(row, 6, "done")
             sheet.update_cell(row, 7, 0)
         ctx.bot_data.pop(f"r_{row}", None)
-        await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<b>Done</b> ✅")
+        await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<b>Done</b> ✓")
 
     # ---- EDIT ----
     elif data.startswith("edit_") and not data.startswith(("emsg_", "edate_", "etime_")):
@@ -1022,105 +954,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ud.clear()
         await show_settings(q.message, q.from_user.id)
 
-    # ======= TEMPLATE CALLBACKS =======
-
-    elif data == "tpl_add":
-        ud.clear()
-        ud["step"] = "tpl_emoji"
-        emoji_btns = []
-        row_btns = []
-        for emoji, label in EMOJIS:
-            row_btns.append(InlineKeyboardButton(f"{emoji}", callback_data=f"tple_{emoji}"))
-            if len(row_btns) == 5:
-                emoji_btns.append(row_btns)
-                row_btns = []
-        if row_btns:
-            emoji_btns.append(row_btns)
-        emoji_btns.append([InlineKeyboardButton("« Back", callback_data="tpl_back")])
-        await safe_edit(q.message,
-            f"{hdr('New Template')}\nPick a category:\n\n"
-            + "  ".join(f"{e} {l}" for e, l in EMOJIS),
-            InlineKeyboardMarkup(emoji_btns))
-
-    elif data.startswith("tple_"):
-        emoji = data[5:]
-        ud["tpl_emoji"] = emoji
-        ud["step"] = "tpl_message"
-        await safe_edit(q.message,
-            f"{hdr('New Template')}\n{emoji}\n\nEnter message:",
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="tpl_add")]]))
-        save_p(ud, q.message)
-
-    elif data.startswith("tplv_"):
-        tpl_row = int(data[5:])
-        try:
-            r = tpl_sheet.row_values(tpl_row)
-        except Exception:
-            await safe_edit(q.message, "Template not found.", home_kb())
-            return
-        emoji = r[1] if len(r) > 1 else "📝"
-        msg = str(r[2]) if len(r) > 2 else ""
-        ts = fmt_time(norm_time(r[3])) if len(r) > 3 else ""
-        rep = fmt_rep(r[4]) if len(r) > 4 else ""
-        await safe_edit(q.message,
-            f"{hdr('Template')}\n{emoji} {msg}\n\n{ts} · {rep}",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton("▶ Activate", callback_data=f"tpla_{tpl_row}"),
-                 InlineKeyboardButton("✕ Delete", callback_data=f"tpld_{tpl_row}")],
-                [InlineKeyboardButton("« Back", callback_data="tpl_back")]]))
-
-    elif data.startswith("tpla_"):
-        tpl_row = int(data[5:])
-        try:
-            r = tpl_sheet.row_values(tpl_row)
-        except Exception:
-            await safe_edit(q.message, "Template not found.", home_kb())
-            return
-        emoji = r[1] if len(r) > 1 else "📝"
-        msg = f"{emoji} {r[2]}" if len(r) > 2 else ""
-        ts = norm_time(r[3]) if len(r) > 3 else ""
-        rep = str(r[4]) if len(r) > 4 else "none"
-        date = datetime.now(IST).strftime("%Y-%m-%d")
-
-        if is_past(date, ts):
-            date = (datetime.now(IST) + timedelta(days=1)).strftime("%Y-%m-%d")
-
-        uid = q.from_user.id
-        sheet.append_row([uid, msg, date, ts, rep, "active", 0], value_input_option="RAW")
-        await safe_edit(q.message,
-            f"{hdr('Saved ✓')}\n{detail(msg, date, ts, fmt_rep(rep))}", home_kb())
-        save_home(ud, q.message)
-
-    elif data.startswith("tpld_"):
-        tpl_row = int(data[5:])
-        try:
-            r = tpl_sheet.row_values(tpl_row)
-            emoji = r[1] if len(r) > 1 else "📝"
-            msg = str(r[2]) if len(r) > 2 else ""
-            tpl_sheet.delete_rows(tpl_row)
-        except Exception:
-            msg, emoji = "Template", "📝"
-        await safe_edit(q.message,
-            f"{emoji} {msg}\n\n<b>Deleted</b> ✕",
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Templates", callback_data="tpl_back")]]))
-
-    elif data == "tpl_back":
-        ud.clear()
-        await show_templates(q.message, q.from_user.id, ud)
-
-    # ---- TEMPLATE REPEAT SAVE ----
-    elif data.startswith("tplrep_"):
-        rep = data[7:]
-        emoji = ud.get("tpl_emoji", "📝")
-        msg = ud.get("tpl_message", "")
-        ts = ud.get("tpl_time", "")
-        uid = q.from_user.id
-        tpl_sheet.append_row([uid, emoji, msg, ts, rep], value_input_option="RAW")
-        ud.clear()
-        await safe_edit(q.message,
-            f"{hdr('Template Saved ✓')}\n{emoji} {msg}\n{fmt_time(ts)} · {fmt_rep(rep)}",
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Templates", callback_data="tpl_back")]]))
-
 
 # ============= TEXT HANDLER ===============
 
@@ -1231,44 +1064,10 @@ async def _do_step(update, ctx, step, text):
         uid = update.effective_user.id
         save_cfg(uid, "digest_time", parsed)
         ud.clear()
-        sent = await update.message.reply_text(
+        await update.message.reply_text(
             f"{hdr('Settings')}\nDigest time updated → <b>{fmt_time(parsed)}</b>",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Settings", callback_data="cfg_back")]]),
             parse_mode="HTML")
-
-    # ---- TEMPLATE STEPS ----
-    elif step == "tpl_message":
-        await rm_prompt(ctx, ud)
-        ud["tpl_message"] = text
-        ud["step"] = "tpl_time"
-        sent = await update.message.reply_text(
-            f"{hdr('New Template')}\n{ud.get('tpl_emoji', '📝')} {text}\n\n"
-            f"Enter default time:\n<i>e.g. 9pm, 9:30 AM, 21:30</i>",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="tpl_add")]]),
-            parse_mode="HTML")
-        save_p(ud, sent)
-
-    elif step == "tpl_time":
-        parsed = parse_time(text)
-        if not parsed:
-            await update.message.reply_text(
-                "Invalid time. Try again:\n<i>e.g. 9pm, 9:30 AM, 21:30</i>", parse_mode="HTML")
-            return
-        await del_prompt(ctx, ud)
-        ud["tpl_time"] = parsed
-        ud["step"] = "tpl_repeat"
-        emoji = ud.get("tpl_emoji", "📝")
-        msg = ud.get("tpl_message", "")
-        sent = await update.message.reply_text(
-            f"{hdr('New Template')}\n{emoji} {msg}\n{fmt_time(parsed)}\n\nRepeat?",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Once", callback_data="tplrep_none"),
-                 InlineKeyboardButton("Daily", callback_data="tplrep_daily")],
-                [InlineKeyboardButton("Weekly", callback_data="tplrep_weekly"),
-                 InlineKeyboardButton("Monthly", callback_data="tplrep_monthly")],
-                [InlineKeyboardButton("✕ Cancel", callback_data="tpl_back")]]),
-            parse_mode="HTML")
-        save_p(ud, sent)
 
 
 # ============= SNOOZE FIRE ================
@@ -1295,7 +1094,6 @@ async def snooze_fire(ctx: ContextTypes.DEFAULT_TYPE):
     sheet.update_cell(row, 6, "pending")
     sheet.update_cell(row, 7, 0)
 
-    # Use user settings for retry
     try:
         uid = int(r[0])
     except (ValueError, TypeError):
@@ -1317,7 +1115,6 @@ async def auto_retry(ctx: ContextTypes.DEFAULT_TYPE):
     if not r or len(r) <= 5 or r[5] != "pending":
         return
 
-    # Get user settings
     try:
         uid = int(r[0])
     except (ValueError, TypeError):
@@ -1357,7 +1154,6 @@ async def auto_retry(ctx: ContextTypes.DEFAULT_TYPE):
 # ============= DAILY DIGEST ==============
 
 async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
-    """Runs every minute, checks if any user's digest time matches now."""
     now = datetime.now(IST)
     nt = now.strftime("%H:%M")
 
@@ -1384,7 +1180,6 @@ async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
         except (ValueError, TypeError):
             continue
 
-        # Get today's reminders
         try:
             rem_rows = sheet.get_all_values()
         except Exception:
@@ -1403,7 +1198,6 @@ async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
                 continue
             items.append(v)
 
-        # Sort by time
         items.sort(key=lambda x: norm_time(str(x[3]).strip()))
 
         if items:
@@ -1473,7 +1267,6 @@ async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
         sheet.update_cell(idx, 6, "pending")
         sheet.update_cell(idx, 7, 0)
 
-        # Use user settings for retry gap
         cfg = get_cfg(uid)
         ctx.job_queue.run_once(auto_retry, cfg["retry_gap"] * 60,
             data={"row": idx, "chat": uid}, name=f"retry-{idx}")
@@ -1486,7 +1279,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_cmd))
     app.add_handler(CommandHandler("list", list_cmd))
-    app.add_handler(CommandHandler("templates", templates_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
     app.add_handler(CommandHandler("info", info_cmd))
     app.add_handler(CallbackQueryHandler(on_btn))
@@ -1499,3 +1291,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
