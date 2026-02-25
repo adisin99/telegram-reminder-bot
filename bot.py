@@ -247,10 +247,9 @@ def do_save(uid, ud, msg, date, time, rep):
 # ============= UI ========================
 
 def home_text():
-    return (f"{hdr('Smart Reminder Bot')}\nManage your reminders easily.\n\n"
-            "Use <b>＋ New</b> or /add to create.\n"
-            "Or just type naturally:\n<i>Buy milk tomorrow at 5pm</i>\n\n"
-            "Use /list to view all.")
+    return (f"{hdr('RemindX')}\nManage your reminders easily.\n\n"
+            "<b>To Create Reminder:</b>\n Click <b>+ New</b>\n Command /add\n"
+            "Just type:\n<i>Buy milk tomorrow at 5pm</i>)
 
 def home_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("＋ New", callback_data="add")]])
@@ -524,7 +523,7 @@ async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"{hdr('Smart Reminder Bot')}\n\n"
+        f"{hdr('RemindX')}\n\n"
         "Set reminders and get notified on time.\n\n"
         "<b>Features</b>\n• One-time & recurring reminders\n• Calendar date picker\n"
         "• Flexible time input\n• Snooze (15m to 12h)\n"
@@ -1291,4 +1290,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
