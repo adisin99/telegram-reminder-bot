@@ -248,8 +248,7 @@ def do_save(uid, ud, msg, date, time, rep):
 
 def home_text():
     return (f"{hdr('RemindX')}\nManage your reminders easily.\n\n"
-            "<b>To Create Reminder:</b>\n Click <b>+ New</b>\n Command /add\n"
-            "Just type:\n<i>Buy milk tomorrow at 5pm</i>")
+            "<b>To Create Reminder :</b>\n | Click <b>+ New</b>\n | Command /add\n | Just type : <i>Buy milk tomorrow at 5pm</i>")
 
 def home_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("＋ New", callback_data="add")]])
@@ -1290,6 +1289,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
