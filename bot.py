@@ -31,15 +31,51 @@ from oauth2client.service_account import ServiceAccountCredentials
 TOKEN = "8235103406:AAFYJ2SNRW4A4AAEyz8t2h-5BeYk8rnzzwE"
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs/edit?pli=1&gid=0#gid=0"
 
-IST = pytz.timezone("Asia/Kolkata")
 DIV = "━━━━━━━━━━━━━━━━━━━━"
 
+DEF_TZ = "Asia/Kolkata"
 DEF_RETRIES = 3
-DEF_RETRY_GAP = 10  # minutes
+DEF_RETRY_GAP = 10
 DEF_DIGEST_TIME = "07:00"
 
+# Curated timezone list: (pytz_name, country, utc_offset, region)
+TZ_DATA = [
+    ("Asia/Kolkata", "India", "+5:30", "Asia"),
+    ("Asia/Dubai", "UAE", "+4", "Asia"),
+    ("Asia/Karachi", "Pakistan", "+5", "Asia"),
+    ("Asia/Dhaka", "Bangladesh", "+6", "Asia"),
+    ("Asia/Bangkok", "Thailand", "+7", "Asia"),
+    ("Asia/Singapore", "Singapore", "+8", "Asia"),
+    ("Asia/Shanghai", "China", "+8", "Asia"),
+    ("Asia/Tokyo", "Japan", "+9", "Asia"),
+    ("Asia/Seoul", "Korea", "+9", "Asia"),
+    ("Asia/Jakarta", "Indonesia", "+7", "Asia"),
+    ("Asia/Riyadh", "Saudi Arabia", "+3", "Asia"),
+    ("Asia/Manila", "Philippines", "+8", "Asia"),
+    ("Europe/London", "UK", "0/+1", "Europe"),
+    ("Europe/Berlin", "Germany", "+1/+2", "Europe"),
+    ("Europe/Paris", "France", "+1/+2", "Europe"),
+    ("Europe/Moscow", "Russia", "+3", "Europe"),
+    ("Europe/Istanbul", "Turkey", "+3", "Europe"),
+    ("America/New_York", "US East", "-5/-4", "Americas"),
+    ("America/Chicago", "US Central", "-6/-5", "Americas"),
+    ("America/Denver", "US Mountain", "-7/-6", "Americas"),
+    ("America/Los_Angeles", "US West", "-8/-7", "Americas"),
+    ("America/Sao_Paulo", "Brazil", "-3", "Americas"),
+    ("America/Mexico_City", "Mexico", "-6/-5", "Americas"),
+    ("Australia/Sydney", "Australia", "+10/+11", "Oceania"),
+    ("Pacific/Auckland", "New Zealand", "+12/+13", "Oceania"),
+    ("Africa/Lagos", "Nigeria", "+1", "Africa"),
+    ("Africa/Cairo", "Egypt", "+2", "Africa"),
+    ("Africa/Nairobi", "Kenya", "+3", "Africa"),
+    ("Africa/Johannesburg", "S. Africa", "+2", "Africa"),
+]
+
+TZ_REGIONS = list(dict.fromkeys(t[3] for t in TZ_DATA))
+TZ_ICONS = {"Asia": "🌏", "Europe": "🌍", "Americas": "🌎", "Oceania": "🌏", "Africa": "🌍"}
+
 # Sheet1: user_id | message | date | time | repeat | status | retry_count
-# Sheet2: user_id | digest_on | digest_time | max_retries | retry_gap
+# Sheet2: user_id | digest_on | digest_time | max_retries | retry_gap | timezone
 
 # =============== LOGGING =================
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -63,7 +99,7 @@ def get_or_create_sheet(name, headers):
     return ws
 
 sheet = get_or_create_sheet("Reminders", ["user_id", "message", "date", "time", "repeat", "status", "retry_count"])
-cfg_sheet = get_or_create_sheet("Settings", ["user_id", "digest_on", "digest_time", "max_retries", "retry_gap"])
+cfg_sheet = get_or_create_sheet("Settings", ["user_id", "digest_on", "digest_time", "max_retries", "retry_gap", "timezone"])
 
 
 # ============= FORMATTERS ================
@@ -101,6 +137,18 @@ def s_icon(s):
 
 def s_label(s):
     return {"active": "Active", "pending": "Pending", "missed": "Missed", "snoozed": "Snoozed"}.get(str(s), str(s))
+
+def tz_label(tz_name):
+    for tz, country, offset, region in TZ_DATA:
+        if tz == tz_name:
+            return country
+    return tz_name.split("/")[-1].replace("_", " ")
+
+def tz_short(tz_name):
+    for tz, country, offset, region in TZ_DATA:
+        if tz == tz_name:
+            return f"{country} ({offset})"
+    return tz_name.split("/")[-1].replace("_", " ")
 
 
 # ============= NORMALIZERS ================
@@ -141,6 +189,22 @@ def norm_time(val):
         return s
 
 
+# ============= TIMEZONE HELPERS ===========
+
+def get_tz(uid):
+    cfg = get_cfg(uid)
+    try:
+        return pytz.timezone(cfg.get("timezone", DEF_TZ))
+    except Exception:
+        return pytz.timezone(DEF_TZ)
+
+def safe_tz(tz_name):
+    try:
+        return pytz.timezone(tz_name)
+    except Exception:
+        return pytz.timezone(DEF_TZ)
+
+
 # ============= SETTINGS HELPERS ===========
 
 def get_cfg(uid):
@@ -152,7 +216,7 @@ def get_cfg(uid):
             client.login()
             rows = cfg_sheet.get_all_values()
         except Exception:
-            return {"digest_on": True, "digest_time": DEF_DIGEST_TIME, "max_retries": DEF_RETRIES, "retry_gap": DEF_RETRY_GAP}
+            return {"digest_on": True, "digest_time": DEF_DIGEST_TIME, "max_retries": DEF_RETRIES, "retry_gap": DEF_RETRY_GAP, "timezone": DEF_TZ}
     for i, r in enumerate(rows[1:], 2):
         if str(r[0]) == uid_s:
             return {
@@ -160,9 +224,10 @@ def get_cfg(uid):
                 "digest_time": norm_time(r[2]) if r[2] else DEF_DIGEST_TIME,
                 "max_retries": int(r[3]) if r[3] else DEF_RETRIES,
                 "retry_gap": int(r[4]) if r[4] else DEF_RETRY_GAP,
+                "timezone": str(r[5]) if len(r) > 5 and r[5] else DEF_TZ,
             }
-    cfg_sheet.append_row([uid_s, "true", DEF_DIGEST_TIME, DEF_RETRIES, DEF_RETRY_GAP], value_input_option="RAW")
-    return {"digest_on": True, "digest_time": DEF_DIGEST_TIME, "max_retries": DEF_RETRIES, "retry_gap": DEF_RETRY_GAP}
+    cfg_sheet.append_row([uid_s, "true", DEF_DIGEST_TIME, DEF_RETRIES, DEF_RETRY_GAP, DEF_TZ], value_input_option="RAW")
+    return {"digest_on": True, "digest_time": DEF_DIGEST_TIME, "max_retries": DEF_RETRIES, "retry_gap": DEF_RETRY_GAP, "timezone": DEF_TZ}
 
 def get_cfg_row(uid):
     uid_s = str(uid)
@@ -182,7 +247,7 @@ def save_cfg(uid, field, value):
         row = get_cfg_row(uid)
     if not row:
         return
-    col_map = {"digest_on": 2, "digest_time": 3, "max_retries": 4, "retry_gap": 5}
+    col_map = {"digest_on": 2, "digest_time": 3, "max_retries": 4, "retry_gap": 5, "timezone": 6}
     if field in col_map:
         cfg_sheet.update_cell(row, col_map[field], str(value))
 
@@ -199,8 +264,8 @@ def get_detail(r):
 def handled(r):
     return len(r) > 5 and r[5] != "pending"
 
-def is_past(ds, ts):
-    now = datetime.now(IST)
+def is_past(ds, ts, tz=None):
+    now = datetime.now(tz or safe_tz(DEF_TZ))
     try:
         d = datetime.strptime(norm_date(ds), "%Y-%m-%d").date()
         if d != now.date():
@@ -285,8 +350,8 @@ def snz_kb(row):
 
 # ============= CALENDAR ==================
 
-def cal_kb(year, month, back_cb="cancel", back_txt="✕ Cancel"):
-    now = datetime.now(IST)
+def cal_kb(year, month, back_cb="cancel", back_txt="✕ Cancel", tz=None):
+    now = datetime.now(tz or safe_tz(DEF_TZ))
     kb = [[InlineKeyboardButton(f"{cal_module.month_name[month]} {year}", callback_data="noop")]]
     kb.append([InlineKeyboardButton(d, callback_data="noop") for d in "Mo Tu We Th Fr Sa Su".split()])
     for week in cal_module.monthcalendar(year, month):
@@ -373,8 +438,8 @@ def _find_time(text):
             if t: return t, m.start(), m.end()
     return None
 
-def _find_date(text):
-    now = datetime.now(IST)
+def _find_date(text, tz=None):
+    now = datetime.now(tz or safe_tz(DEF_TZ))
     low = text.lower()
     for pat, delta in [
         (r'\bday\s+after\s+tomorrow\b', 2), (r'\b(today|tonight)\b', 0),
@@ -438,8 +503,10 @@ def _clean(text, spans):
     text = re.sub(r'\s+on\s*$', '', text, flags=re.I).strip()
     return text[0].upper() + text[1:] if text else text
 
-def parse_nl(text):
-    tr, dr, rr = _find_time(text), _find_date(text), _find_repeat(text)
+def parse_nl(text, tz=None):
+    tr = _find_time(text)
+    dr = _find_date(text, tz)
+    rr = _find_repeat(text)
     ts = tr[0] if tr else None
     ds = dr[0] if dr else None
     rep = rr[0] if rr else None
@@ -521,13 +588,17 @@ async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await show_list(update.message, update.effective_user.id, ctx.user_data, new=True)
 
 async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cfg = get_cfg(uid)
+    tz_info = tz_short(cfg["timezone"])
     await update.message.reply_text(
         f"{hdr('RemindX')}\n\n"
         "Set reminders and get notified on time.\n\n"
         "<b>Features</b>\n• One-time & recurring reminders\n• Calendar date picker\n"
         "• Flexible time input\n• Snooze (15m to 12h)\n"
         "• Auto-retry if missed\n• Edit or cancel anytime\n"
-        "• Daily morning digest\n• Customisable settings\n\n"
+        "• Daily morning digest\n• Customisable settings\n"
+        f"• Per-user timezone ({tz_info})\n\n"
         "<b>Smart Input</b>\nJust type naturally:\n"
         "<code>Buy milk tomorrow at 5pm</code>\n"
         "<code>Call mom at 3:30pm</code>\n"
@@ -550,21 +621,58 @@ async def show_settings(target, uid, new=False):
     cfg = get_cfg(uid)
     d_status = "ON" if cfg["digest_on"] else "OFF"
     d_time = fmt_time(cfg["digest_time"]) if cfg["digest_on"] else "—"
+    tz_name = cfg.get("timezone", DEF_TZ)
+    tz_disp = tz_label(tz_name)
     txt = (f"{hdr('Settings')}\n\n"
            f"<b>Daily Digest</b>: {d_status}"
            + (f" · {d_time}" if cfg["digest_on"] else "") +
            f"\n<b>Max Retries</b>: {cfg['max_retries']}×"
-           f"\n<b>Retry Gap</b>: {cfg['retry_gap']} min")
+           f"\n<b>Retry Gap</b>: {cfg['retry_gap']} min"
+           f"\n<b>Timezone</b>: {tz_disp}")
     btns = [
         [InlineKeyboardButton(f"Digest: {d_status}", callback_data="cfg_digest_toggle"),
          InlineKeyboardButton(f"⏰ {d_time}" if cfg["digest_on"] else "—", callback_data="cfg_digest_time" if cfg["digest_on"] else "noop")],
         [InlineKeyboardButton(f"Retries: {cfg['max_retries']}×", callback_data="cfg_retries"),
          InlineKeyboardButton(f"Gap: {cfg['retry_gap']}m", callback_data="cfg_gap")],
+        [InlineKeyboardButton(f"🌍 {tz_disp}", callback_data="cfg_tz")],
         [InlineKeyboardButton("« Back", callback_data="home")]]
     if new:
         await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
     else:
         await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+
+
+# ============= TIMEZONE PICKER ============
+
+def tz_region_kb():
+    btns = []
+    row = []
+    for region in TZ_REGIONS:
+        icon = TZ_ICONS.get(region, "🌐")
+        row.append(InlineKeyboardButton(f"{icon} {region}", callback_data=f"tzr_{region}"))
+        if len(row) == 2:
+            btns.append(row)
+            row = []
+    if row:
+        btns.append(row)
+    btns.append([InlineKeyboardButton("« Back", callback_data="cfg_back")])
+    return InlineKeyboardMarkup(btns)
+
+def tz_list_kb(region, current_tz):
+    btns = []
+    row = []
+    for idx, (tz, country, offset, reg) in enumerate(TZ_DATA):
+        if reg != region:
+            continue
+        lbl = f"[{country}]" if tz == current_tz else country
+        row.append(InlineKeyboardButton(f"{lbl} {offset}", callback_data=f"tzs_{idx}"))
+        if len(row) == 2:
+            btns.append(row)
+            row = []
+    if row:
+        btns.append(row)
+    btns.append([InlineKeyboardButton("« Regions", callback_data="cfg_tz")])
+    return InlineKeyboardMarkup(btns)
 
 
 # ============= SHOW LIST =================
@@ -625,7 +733,7 @@ async def finish_or_repeat(target, uid, ud, msg, date, time, edit_msg=False):
     rep = ud.get("repeat")
     if rep:
         do_save(uid, ud, msg, date, time, rep)
-        txt = f"{hdr('Saved ✓')}\n{detail(msg, date, time, fmt_rep(rep))}"
+        txt = f"{hdr('Saved ⌚')}\n{detail(msg, date, time, fmt_rep(rep))}"
         if edit_msg:
             await safe_edit(target, txt, home_kb())
         else:
@@ -647,6 +755,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data, ud = q.data, ctx.user_data
+    uid = q.from_user.id
 
     if data == "noop":
         return
@@ -669,6 +778,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("cal_"):
         parts = data[4:].split("_")
         yr, mo = int(parts[0]), int(parts[1])
+        utz = get_tz(uid)
         step = ud.get("step")
         if step == "edit_date":
             row = ud.get("editing_row")
@@ -676,29 +786,30 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             msg, ds, ts, rs = get_detail(r)
             await safe_edit(q.message,
                 f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nPick new date:",
-                cal_kb(yr, mo, f"edit_{row}", "« Back"))
+                cal_kb(yr, mo, f"edit_{row}", "« Back", tz=utz))
         else:
             msg = ud.get("message", "")
             ts = ud.get("time", "")
             td = f"\n{fmt_time(ts)}" if ts else ""
             await safe_edit(q.message,
-                f"{hdr('New Reminder')}\n{msg}{td}\n\nPick a date:", cal_kb(yr, mo))
+                f"{hdr('New Reminder')}\n{msg}{td}\n\nPick a date:", cal_kb(yr, mo, tz=utz))
 
     # ---- DAY SELECTED ----
     elif data.startswith("day_"):
         date_str = data[4:]
         step = ud.get("step")
+        utz = get_tz(uid)
 
         if step == "edit_date":
             row = ud.get("editing_row")
             r = sheet.row_values(row)
             msg, old_d, ts, rs = get_detail(r)
-            if is_past(date_str, ts):
-                now = datetime.now(IST)
+            if is_past(date_str, ts, utz):
+                now = datetime.now(utz)
                 await safe_edit(q.message,
                     f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(old_d)} · {fmt_time(ts)}</i>\n\n"
                     f"{past_msg(ts)}\nPick a future date or change the time first.",
-                    cal_kb(now.year, now.month, f"edit_{row}", "« Back"))
+                    cal_kb(now.year, now.month, f"edit_{row}", "« Back", tz=utz))
                 return
             sheet.update_cell(row, 3, date_str)
             ud.clear()
@@ -711,13 +822,13 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             msg = ud.get("message", "")
             ts = ud.get("time")
             if ts:
-                if is_past(date_str, ts):
-                    now = datetime.now(IST)
+                if is_past(date_str, ts, utz):
+                    now = datetime.now(utz)
                     await safe_edit(q.message,
                         f"{hdr('New Reminder')}\n{msg}\n{fmt_time(ts)}\n\n"
-                        f"{past_msg(ts)}\nPick a future date:", cal_kb(now.year, now.month))
+                        f"{past_msg(ts)}\nPick a future date:", cal_kb(now.year, now.month, tz=utz))
                     return
-                await finish_or_repeat(q.message, q.from_user.id, ud, msg, date_str, ts, edit_msg=True)
+                await finish_or_repeat(q.message, uid, ud, msg, date_str, ts, edit_msg=True)
             else:
                 ud["step"] = "time"
                 await safe_edit(q.message,
@@ -729,7 +840,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("rep_"):
         rep = data[4:]
         msg, date, time = ud.get("message", ""), ud.get("date", ""), ud.get("time", "")
-        do_save(q.from_user.id, ud, msg, date, time, rep)
+        do_save(uid, ud, msg, date, time, rep)
         await safe_edit(q.message,
             f"{hdr('Saved ✓')}\n{detail(msg, date, time, fmt_rep(rep))}", home_kb())
         save_home(ud, q.message)
@@ -783,13 +894,14 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         kill_jobs(ctx.job_queue, row)
         await rm_btns(ctx, row)
-        nt = datetime.now(IST) + timedelta(minutes=mins)
+        utz = get_tz(uid)
+        nt = datetime.now(utz) + timedelta(minutes=mins)
         rep = r[4] if len(r) > 4 else "none"
         if rep and rep != "none":
             sheet.update_cell(row, 6, "snoozed")
             sheet.update_cell(row, 7, 0)
             ctx.job_queue.run_once(snooze_fire, mins * 60,
-                data={"row": row, "chat": q.from_user.id}, name=f"snooze-{row}")
+                data={"row": row, "chat": uid}, name=f"snooze-{row}")
         else:
             sheet.update_cell(row, 3, nt.strftime("%Y-%m-%d"))
             sheet.update_cell(row, 4, nt.strftime("%H:%M"))
@@ -813,7 +925,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             sheet.update_cell(row, 6, "done")
             sheet.update_cell(row, 7, 0)
         ctx.bot_data.pop(f"r_{row}", None)
-        await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<b>Done</b> ✓")
+        await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<b>Done</b> ✅")
 
     # ---- EDIT ----
     elif data.startswith("edit_") and not data.startswith(("emsg_", "edate_", "etime_")):
@@ -845,10 +957,11 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ud["editing_row"], ud["step"] = row, "edit_date"
         r = sheet.row_values(row)
         msg, ds, ts, rs = get_detail(r)
-        now = datetime.now(IST)
+        utz = get_tz(uid)
+        now = datetime.now(utz)
         await safe_edit(q.message,
             f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nPick new date:",
-            cal_kb(now.year, now.month, f"edit_{row}", "« Back"))
+            cal_kb(now.year, now.month, f"edit_{row}", "« Back", tz=utz))
 
     elif data.startswith("etime_"):
         row = int(data[6:])
@@ -876,12 +989,11 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "list_refresh":
         ud.clear()
-        await show_list(q.message, q.from_user.id, ud)
+        await show_list(q.message, uid, ud)
 
     # ======= SETTINGS CALLBACKS =======
 
     elif data == "cfg_digest_toggle":
-        uid = q.from_user.id
         cfg = get_cfg(uid)
         new_val = not cfg["digest_on"]
         save_cfg(uid, "digest_on", str(new_val).lower())
@@ -889,7 +1001,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "cfg_digest_time":
         ud.clear()
-        uid = q.from_user.id
         cfg = get_cfg(uid)
         ud["step"] = "set_digest_time"
         await safe_edit(q.message,
@@ -899,7 +1010,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_p(ud, q.message)
 
     elif data == "cfg_retries":
-        uid = q.from_user.id
         cfg = get_cfg(uid)
         cur = cfg["max_retries"]
         btns = []
@@ -919,12 +1029,10 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("cfgr_"):
         val = int(data[5:])
-        uid = q.from_user.id
         save_cfg(uid, "max_retries", val)
         await show_settings(q.message, uid)
 
     elif data == "cfg_gap":
-        uid = q.from_user.id
         cfg = get_cfg(uid)
         cur = cfg["retry_gap"]
         btns = []
@@ -944,13 +1052,35 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("cfgg_"):
         val = int(data[5:])
-        uid = q.from_user.id
         save_cfg(uid, "retry_gap", val)
         await show_settings(q.message, uid)
 
+    # ---- TIMEZONE ----
+    elif data == "cfg_tz":
+        cfg = get_cfg(uid)
+        cur_tz = cfg.get("timezone", DEF_TZ)
+        await safe_edit(q.message,
+            f"{hdr('Timezone')}\n\nCurrent: <b>{tz_short(cur_tz)}</b>\n\nPick a region:",
+            tz_region_kb())
+
+    elif data.startswith("tzr_"):
+        region = data[4:]
+        cfg = get_cfg(uid)
+        cur_tz = cfg.get("timezone", DEF_TZ)
+        await safe_edit(q.message,
+            f"{hdr('Timezone')}\n\n{TZ_ICONS.get(region, '🌐')} <b>{region}</b>\n\nPick your timezone:",
+            tz_list_kb(region, cur_tz))
+
+    elif data.startswith("tzs_"):
+        idx = int(data[4:])
+        if 0 <= idx < len(TZ_DATA):
+            tz_name = TZ_DATA[idx][0]
+            save_cfg(uid, "timezone", tz_name)
+            await show_settings(q.message, uid)
+
     elif data == "cfg_back":
         ud.clear()
-        await show_settings(q.message, q.from_user.id)
+        await show_settings(q.message, uid)
 
 
 # ============= TEXT HANDLER ===============
@@ -964,7 +1094,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _try_nl(update, ctx, text)
 
 async def _try_nl(update, ctx, text):
-    result = parse_nl(text)
+    uid = update.effective_user.id
+    utz = get_tz(uid)
+    result = parse_nl(text, tz=utz)
     if not result:
         return
     msg, time, date, rep = result['message'], result['time'], result['date'], result.get('repeat')
@@ -977,28 +1109,30 @@ async def _try_nl(update, ctx, text):
     if rep:
         ud["repeat"] = rep
     if not date:
-        date = datetime.now(IST).strftime("%Y-%m-%d")
-    if is_past(date, time):
+        date = datetime.now(utz).strftime("%Y-%m-%d")
+    if is_past(date, time, utz):
         ud["step"] = "date"
-        now = datetime.now(IST)
+        now = datetime.now(utz)
         sent = await update.message.reply_text(
             f"{hdr('New Reminder')}\n{msg}\n\n{past_msg(time)}\nPick a future date:",
-            reply_markup=cal_kb(now.year, now.month), parse_mode="HTML")
+            reply_markup=cal_kb(now.year, now.month, tz=utz), parse_mode="HTML")
         save_p(ud, sent)
     else:
         ud["date"] = date
-        await finish_or_repeat(update.message, update.effective_user.id, ud, msg, date, time)
+        await finish_or_repeat(update.message, uid, ud, msg, date, time)
 
 async def _do_step(update, ctx, step, text):
     ud = ctx.user_data
+    uid = update.effective_user.id
 
     if step == "message":
         await rm_prompt(ctx, ud)
         ud["message"], ud["step"] = text, "date"
-        now = datetime.now(IST)
+        utz = get_tz(uid)
+        now = datetime.now(utz)
         sent = await update.message.reply_text(
             f"{hdr('New Reminder')}\n{text}\n\nPick a date:",
-            reply_markup=cal_kb(now.year, now.month), parse_mode="HTML")
+            reply_markup=cal_kb(now.year, now.month, tz=utz), parse_mode="HTML")
         save_p(ud, sent)
 
     elif step == "time":
@@ -1008,13 +1142,14 @@ async def _do_step(update, ctx, step, text):
                 "Invalid time. Try again:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", parse_mode="HTML")
             return
         ds = ud.get("date", "")
-        if is_past(ds, parsed):
+        utz = get_tz(uid)
+        if is_past(ds, parsed, utz):
             await update.message.reply_text(f"{past_msg(parsed)}\nEnter a future time:", parse_mode="HTML")
             return
         await del_prompt(ctx, ud)
         ud["time"] = parsed
         msg = ud.get("message", "")
-        await finish_or_repeat(update.message, update.effective_user.id, ud, msg, ds, parsed)
+        await finish_or_repeat(update.message, uid, ud, msg, ds, parsed)
 
     elif step == "edit_message":
         row = ud.get("editing_row")
@@ -1040,7 +1175,8 @@ async def _do_step(update, ctx, step, text):
             return
         r = sheet.row_values(row)
         msg, ds, old_t, rs = get_detail(r)
-        if is_past(ds, parsed):
+        utz = get_tz(uid)
+        if is_past(ds, parsed, utz):
             await update.message.reply_text(f"{past_msg(parsed)}\nEnter a future time:", parse_mode="HTML")
             return
         await del_prompt(ctx, ud)
@@ -1059,7 +1195,6 @@ async def _do_step(update, ctx, step, text):
                 "Invalid time. Try again:\n<i>e.g. 7am, 8:30 AM, 06:00</i>", parse_mode="HTML")
             return
         await del_prompt(ctx, ud)
-        uid = update.effective_user.id
         save_cfg(uid, "digest_time", parsed)
         ud.clear()
         await update.message.reply_text(
@@ -1152,9 +1287,6 @@ async def auto_retry(ctx: ContextTypes.DEFAULT_TYPE):
 # ============= DAILY DIGEST ==============
 
 async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(IST)
-    nt = now.strftime("%H:%M")
-
     try:
         cfg_rows = cfg_sheet.get_all_values()
     except Exception:
@@ -1169,10 +1301,16 @@ async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
             continue
         if str(r[1]).lower() != "true":
             continue
+
+        uid = r[0]
+        tz_name = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        user_tz = safe_tz(tz_name)
+        now = datetime.now(user_tz)
+        nt = now.strftime("%H:%M")
+
         if norm_time(r[2]) != nt:
             continue
 
-        uid = r[0]
         try:
             uid_int = int(uid)
         except (ValueError, TypeError):
@@ -1222,10 +1360,30 @@ async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
 # ============= SCHEDULER =================
 
 async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(IST)
-    nd, nt = now.strftime("%Y-%m-%d"), now.strftime("%H:%M")
-    logger.info(f"[CRON] {nd} {nt}")
+    # Read all settings once for timezone lookup
+    try:
+        cfg_vals = cfg_sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            cfg_vals = cfg_sheet.get_all_values()
+        except Exception:
+            cfg_vals = []
 
+    tz_map = {}
+    cfg_map = {}
+    for r in cfg_vals[1:]:
+        if not r:
+            continue
+        uid_s = str(r[0])
+        tz_name = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        tz_map[uid_s] = tz_name
+        cfg_map[uid_s] = {
+            "max_retries": int(r[3]) if len(r) > 3 and r[3] else DEF_RETRIES,
+            "retry_gap": int(r[4]) if len(r) > 4 and r[4] else DEF_RETRY_GAP,
+        }
+
+    # Read all reminders
     try:
         vals = sheet.get_all_values()
     except Exception:
@@ -1239,6 +1397,14 @@ async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
     for idx, v in enumerate(vals[1:], 2):
         if len(v) < 7 or str(v[5]).strip().lower() != "active":
             continue
+
+        uid_s = str(v[0])
+        tz_name = tz_map.get(uid_s, DEF_TZ)
+        user_tz = safe_tz(tz_name)
+        now = datetime.now(user_tz)
+        nd = now.strftime("%Y-%m-%d")
+        nt = now.strftime("%H:%M")
+
         if norm_date(str(v[2]).strip()) != nd or norm_time(str(v[3]).strip()) != nt:
             continue
 
@@ -1249,7 +1415,7 @@ async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
         msg = str(v[1]).strip()
-        logger.info(f"[CRON] FIRE row {idx}: '{msg[:30]}' → {uid}")
+        logger.info(f"[CRON] FIRE row {idx}: '{msg[:30]}' → {uid} (tz={tz_name})")
         kill_jobs(ctx.job_queue, idx)
         await rm_btns(ctx, idx)
 
@@ -1265,8 +1431,8 @@ async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
         sheet.update_cell(idx, 6, "pending")
         sheet.update_cell(idx, 7, 0)
 
-        cfg = get_cfg(uid)
-        ctx.job_queue.run_once(auto_retry, cfg["retry_gap"] * 60,
+        user_cfg = cfg_map.get(uid_s, {"retry_gap": DEF_RETRY_GAP})
+        ctx.job_queue.run_once(auto_retry, user_cfg["retry_gap"] * 60,
             data={"row": idx, "chat": uid}, name=f"retry-{idx}")
 
 
@@ -1289,7 +1455,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
