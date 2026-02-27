@@ -292,7 +292,10 @@ def gstatus_text(tid, msg):
     if all(s in ("done", "missed") for _, _, s in active):
         if all(s == "done" for _, _, s in active):
             return f"{msg}\n\n✅ All done · {', '.join(n for _, n, _ in active)}"
-    return f"{'⏰ ' if any(s not in ('done','missed') for _,_,s in active) else ''}{msg}\n\n{' · '.join(f'{GT_IC.get(s,\"⏳\")} {n}' for _, n, s in active)}"
+    default_icon = "⏳"
+    prefix = "⏰ " if any(s not in ("done", "missed") for _, _, s in active) else ""
+    parts = [f"{GT_IC.get(s, default_icon)} {n}" for _, n, s in active]
+    return f"{prefix}{msg}\n\n{' · '.join(parts)}"
 
 def gsub_text(tid):
     active = [(u, n) for u, n, s in get_tmembers(tid) if s != "skipped"]
@@ -1139,3 +1142,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
