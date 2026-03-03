@@ -334,50 +334,47 @@ def track_user(user):
         USERNAME_CACHE[user.username.lower()] = (str(user.id), user.first_name or "User")
         logger.info(f"[TRACK] Cached @{user.username} = {user.id} ({user.first_name})")
 
-# ============= MENTION EXTRACTION =========
-async def extract_mentions(message, bot):
-    """Extract tagged users from both text_mention and @username mentions."""
-    tagged = []
-    seen_ids = set()
+# ============= MENTION/TAG EXTRACTION =========
+def extract_tag_texts(message):
+    """Extract tag identifiers for matching against subscriber names. No API calls needed."""
+    tags = []
     if not message.entities:
-        logger.info("[MENTION] No entities found in message")
-        return tagged
+        return tags
     for entity in message.entities:
-        logger.info(f"[MENTION] Entity: type={entity.type}, offset={entity.offset}, length={entity.length}, user={getattr(entity, 'user', None)}")
-        # text_mention: user selected from autocomplete (has user object)
         if entity.type == "text_mention" and entity.user:
+            # User selected from autocomplete — has full user object
             uid = str(entity.user.id)
-            if uid not in seen_ids:
-                tagged.append((uid, entity.user.first_name or "User"))
-                seen_ids.add(uid)
-                logger.info(f"[MENTION] text_mention resolved: {uid} = {entity.user.first_name}")
-        # mention: @username typed or selected from autocomplete
+            names = set()
+            if entity.user.first_name: names.add(entity.user.first_name.lower().strip())
+            if entity.user.username: names.add(entity.user.username.lower().strip())
+            tags.append({"uid": uid, "names": names})
+            logger.info(f"[TAG] text_mention: uid={uid}, names={names}")
         elif entity.type == "mention":
-            raw_username = (message.text or "")[entity.offset:entity.offset + entity.length]
-            clean_username = raw_username.lstrip("@").lower()
-            logger.info(f"[MENTION] Trying to resolve @mention: {raw_username}")
-            # Try cache first (most reliable)
-            cached = USERNAME_CACHE.get(clean_username)
+            # @username typed or selected — extract raw text
+            raw = (message.text or "")[entity.offset:entity.offset + entity.length]
+            clean = raw.lstrip("@").lower().strip()
+            names = {clean}
+            # Try cache for uid + first_name
+            cached = USERNAME_CACHE.get(clean)
+            uid = None
             if cached:
-                uid, name = cached
-                if uid not in seen_ids:
-                    tagged.append((uid, name))
-                    seen_ids.add(uid)
-                    logger.info(f"[MENTION] Cache hit: @{clean_username} = {uid} ({name})")
-                continue
-            # Fallback: try bot.get_chat (works if user started bot privately)
-            try:
-                chat = await bot.get_chat(raw_username)
-                if chat and chat.id:
-                    uid = str(chat.id)
-                    if uid not in seen_ids:
-                        tagged.append((uid, chat.first_name or clean_username))
-                        seen_ids.add(uid)
-                        logger.info(f"[MENTION] bot.get_chat resolved: {uid} = {chat.first_name}")
-            except Exception as e:
-                logger.warning(f"[MENTION] Could not resolve @{clean_username}: {e}")
-    logger.info(f"[MENTION] Final tagged list: {tagged}")
-    return tagged
+                uid = cached[0]
+                names.add(cached[1].lower().strip())
+            tags.append({"uid": uid, "names": names})
+            logger.info(f"[TAG] @mention: raw={raw}, uid={uid}, names={names}")
+    logger.info(f"[TAG] Final tags: {tags}")
+    return tags
+
+def is_subscriber_tagged(sub_uid, sub_name, tags):
+    """Check if a subscriber matches any tag by uid or name."""
+    sub_uid_s = str(sub_uid)
+    sub_name_l = sub_name.lower().strip()
+    for tag in tags:
+        if tag["uid"] and tag["uid"] == sub_uid_s:
+            return True
+        if sub_name_l in tag["names"]:
+            return True
+    return False
 
 def strip_mentions(text, message):
     if not message.entities: return text
@@ -739,10 +736,10 @@ async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "User"
     ud["g_chat"], ud["g_name"] = gid, name
 
-    # Extract tagged members (both @username and text_mention)
-    tagged = await extract_mentions(update.message, ctx.bot)
-    logger.info(f"[REMIND] Tagged result: {tagged}")
-    if tagged: ud["g_tagged"] = tagged
+    # Extract tag texts for matching against subscribers (no API calls)
+    tags = extract_tag_texts(update.message)
+    logger.info(f"[REMIND] Tags extracted: {tags}")
+    if tags: ud["g_tags"] = tags
 
     raw = update.message.text or ""
     text = re.sub(r'^/remind(@\w+)?\s*', '', raw.strip(), flags=re.I).strip()
@@ -822,21 +819,31 @@ async def finish_group_remind(target, ctx, uid, ud, rep, edit_msg=False):
     msg, ds, ts = ud.get("message", ""), ud.get("date", ""), ud.get("time", "")
     gid = ud.get("g_chat", "")
     name = ud.get("g_name", "User")
-    tagged = ud.get("g_tagged")
+    tags = ud.get("g_tags")  # list of {"uid": ..., "names": set(...)}
     tid = gen_tid()
 
     sheet.append_row([uid, msg, ds, ts, rep, "active", 0, gid, tid], value_input_option="RAW")
 
-    logger.info(f"[FINISH_GRP] tagged={tagged}, gid={gid}, tid={tid}")
-    if tagged:
-        logger.info(f"[FINISH_GRP] TAGGED BRANCH: adding only {len(tagged)} tagged users")
-        for t_uid, t_name in tagged: add_tmember(tid, t_uid, t_name)
-    else:
-        subs = get_gsubs(gid)
-        logger.info(f"[FINISH_GRP] SUBSCRIBER BRANCH: adding {len(subs)} subscribers")
-        for sub_uid, sub_name in subs: add_tmember(tid, sub_uid, sub_name)
+    subs = get_gsubs(gid)
+    logger.info(f"[FINISH_GRP] tags={tags}, gid={gid}, tid={tid}, subs={len(subs)}")
 
-    sub_info = f"For: {', '.join(n for _, n in tagged)}" if tagged else gsub_text(tid)
+    if tags:
+        # Add ALL subscribers but mark non-tagged as "skipped"
+        tagged_names = []
+        for sub_uid, sub_name in subs:
+            if is_subscriber_tagged(sub_uid, sub_name, tags):
+                add_tmember(tid, sub_uid, sub_name, "waiting")
+                tagged_names.append(sub_name)
+                logger.info(f"[FINISH_GRP] TAGGED: {sub_name} ({sub_uid})")
+            else:
+                add_tmember(tid, sub_uid, sub_name, "skipped")
+                logger.info(f"[FINISH_GRP] SKIPPED: {sub_name} ({sub_uid})")
+        sub_info = f"For: {', '.join(tagged_names)}" if tagged_names else "No matching subscribers"
+    else:
+        # No tags — add all subscribers as waiting
+        for sub_uid, sub_name in subs: add_tmember(tid, sub_uid, sub_name)
+        sub_info = gsub_text(tid)
+
     txt = f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, fmt_rep(rep))}\nBy {name}\n\n{sub_info}"
     show_rep = (rep == "none")
     kb = gjoin_kb(tid, show_rep)
