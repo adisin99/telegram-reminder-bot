@@ -98,7 +98,7 @@ def get_or_create_sheet(name, headers):
     return ws
 
 sheet = get_or_create_sheet("Reminders", ["user_id", "message", "date", "time", "repeat", "status", "retry_count", "group_id", "task_id"])
-cfg_sheet = get_or_create_sheet("Settings", ["user_id", "digest_on", "digest_time", "max_retries", "retry_gap", "timezone"])
+cfg_sheet = get_or_create_sheet("Settings", ["user_id", "digest_on", "digest_time", "max_retries", "retry_gap", "timezone", "username"])
 grp_sheet = get_or_create_sheet("GroupMembers", ["group_id", "user_id", "first_name", "username", "subscribed"])
 task_sheet = get_or_create_sheet("TaskMembers", ["task_id", "user_id", "first_name", "status"])
 
@@ -187,7 +187,7 @@ def get_cfg(uid):
             return {"digest_on": str(r[1]).lower() != "false", "digest_time": norm_time(r[2]) if r[2] else DEF_DIGEST_TIME,
                     "max_retries": int(r[3]) if r[3] else DEF_RETRIES, "retry_gap": int(r[4]) if r[4] else DEF_RETRY_GAP,
                     "timezone": str(r[5]) if len(r) > 5 and r[5] else DEF_TZ}
-    cfg_sheet.append_row([uid_s, "true", DEF_DIGEST_TIME, DEF_RETRIES, DEF_RETRY_GAP, DEF_TZ], value_input_option="RAW")
+    cfg_sheet.append_row([uid_s, "true", DEF_DIGEST_TIME, DEF_RETRIES, DEF_RETRY_GAP, DEF_TZ, ""], value_input_option="RAW")
     return {"digest_on": True, "digest_time": DEF_DIGEST_TIME, "max_retries": DEF_RETRIES, "retry_gap": DEF_RETRY_GAP, "timezone": DEF_TZ}
 
 def save_cfg(uid, field, value):
@@ -203,6 +203,31 @@ def save_cfg(uid, field, value):
     except Exception: return
     for i, r in enumerate(rows[1:], 2):
         if str(r[0]) == uid_s: cfg_sheet.update_cell(i, col, str(value)); return
+
+def update_username(uid, username):
+    """Update username in Settings sheet (col 7)."""
+    if not username: return
+    uid_s, uname = str(uid), username.lower().strip()
+    try: rows = cfg_sheet.get_all_values()
+    except Exception: return
+    for i, r in enumerate(rows[1:], 2):
+        if str(r[0]) == uid_s:
+            current = r[6].strip().lower() if len(r) > 6 else ""
+            if current != uname:
+                # Pad row if needed (old rows may have only 6 cols)
+                if len(r) <= 6:
+                    cfg_sheet.update_cell(i, 7, uname)
+                else:
+                    cfg_sheet.update_cell(i, 7, uname)
+            return
+    # User not found — get_cfg will create row, then update
+    get_cfg(uid)
+    try: rows = cfg_sheet.get_all_values()
+    except Exception: return
+    for i, r in enumerate(rows[1:], 2):
+        if str(r[0]) == uid_s:
+            cfg_sheet.update_cell(i, 7, uname)
+            return
 
 def get_detail(r):
     return (str(r[1]).strip() if len(r) > 1 else "", norm_date(r[2]) if len(r) > 2 else "",
@@ -264,7 +289,7 @@ def set_gsub(gid, uid, name, username="", sub=True):
     for i, r in enumerate(rows[1:], 2):
         if str(r[0]) == gid_s and str(r[1]) == uid_s:
             grp_sheet.update_cell(i, 3, name)
-            grp_sheet.update_cell(i, 4, uname)
+            if uname: grp_sheet.update_cell(i, 4, uname)
             grp_sheet.update_cell(i, 5, str(sub).lower())
             return
     grp_sheet.append_row([gid_s, uid_s, name, uname, str(sub).lower()], value_input_option="RAW")
@@ -339,13 +364,11 @@ def extract_tags(message):
         return tags
     for entity in message.entities:
         if entity.type == "text_mention" and entity.user:
-            # Autocomplete selection — user object available
             if entity.user.first_name:
                 tags.append(entity.user.first_name.lower().strip())
             if entity.user.username:
                 tags.append(entity.user.username.lower().strip())
         elif entity.type == "mention":
-            # @username typed or selected
             raw = (message.text or "")[entity.offset:entity.offset + entity.length]
             clean = raw.lstrip("@").lower().strip()
             if clean:
@@ -398,6 +421,10 @@ async def rm_gpm(ctx, tid, uid_s):
     if old:
         try: await ctx.bot.edit_message_reply_markup(chat_id=old["c"], message_id=old["m"], reply_markup=None)
         except Exception: pass
+
+def get_username(user):
+    """Get username from telegram user object, empty string if none."""
+    return user.username.lower().strip() if user and getattr(user, 'username', None) else ""
 
 # ============= UI ========================
 HOME_TEXT = (f"{hdr('Smart Reminder Bot')}\nType your reminder below:\n\n"
@@ -628,10 +655,6 @@ async def auto_minimize(ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML")
     except Exception: pass
 
-def get_username(user):
-    """Get username from telegram user object, empty string if none."""
-    return user.username.lower().strip() if user and getattr(user, 'username', None) else ""
-
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         gid = str(update.effective_chat.id)
@@ -647,7 +670,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         })
         return
     await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
-    get_cfg(update.effective_user.id)
+    user = update.effective_user
+    get_cfg(user.id)
+    update_username(user.id, get_username(user))
     sent = await update.message.reply_text(HOME_TEXT, reply_markup=home_kb(), parse_mode="HTML")
     save_home(ctx.user_data, sent)
 
@@ -655,6 +680,7 @@ async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.message.reply_text("Use /remind here for group reminders."); return
     await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
     ctx.user_data["step"] = "message"
     sent = await update.message.reply_text(f"{hdr('New Reminder')}\nEnter message:", reply_markup=cancel_kb(), parse_mode="HTML")
     save_p(ctx.user_data, sent)
@@ -684,11 +710,13 @@ async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         })
         return
     await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
     await show_list(update.message, update.effective_user.id, ctx.user_data, new=True)
 
 async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.message.reply_text("Use /info in private chat."); return
+    update_username(update.effective_user.id, get_username(update.effective_user))
     cfg = get_cfg(update.effective_user.id)
     await update.message.reply_text(
         f"{hdr('Smart Reminder Bot')}\n\nSet reminders and get notified on time.\n\n"
@@ -757,12 +785,12 @@ async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def settings_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private": return
     await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
     await show_settings(update.message, update.effective_user.id, new=True)
 
 def get_user_groups(uid):
     uid_s = str(uid)
     gids = []
-    # subscribed is now column index 4 (0-based) = col 5 in sheet
     for r in grp_read(grp_sheet, lambda r: str(r[1]) == uid_s and len(r) > 4 and str(r[4]).lower() == "true"):
         if r[0] not in gids: gids.append(r[0])
     return gids
@@ -931,6 +959,10 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     data, ud, uid = q.data, ctx.user_data, q.from_user.id
     if data == "noop": return
+
+    # Update username on any button click in private
+    if update.effective_chat.type == "private":
+        update_username(uid, get_username(q.from_user))
 
     if data in ("home", "cancel"):
         ud.clear(); await safe_edit(q.message, HOME_TEXT, home_kb()); save_home(ud, q.message); return
@@ -1283,7 +1315,6 @@ async def _btn_cfg(q, ctx, ud, uid, data):
             rows = grp_sheet.get_all_values()
             for i, r in enumerate(rows[1:], 2):
                 if str(r[0]) == gid_s and str(r[1]) == uid_s:
-                    # subscribed is now col 5
                     grp_sheet.update_cell(i, 5, "false"); break
         except Exception: pass
         grps = get_user_groups(uid)
@@ -1307,6 +1338,10 @@ async def _btn_cfg(q, ctx, ud, uid, data):
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     step = ctx.user_data.get("step", "")
     text = update.message.text.strip()
+
+    # Update username on any text in private
+    if update.effective_chat.type == "private":
+        update_username(update.effective_user.id, get_username(update.effective_user))
 
     if update.effective_chat.type != "private":
         # In groups: handle g_ steps if in correct group
