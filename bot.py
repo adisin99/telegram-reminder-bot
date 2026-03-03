@@ -327,11 +327,15 @@ def advance_rep_grp(row, r, tid):
 
 # ============= USERNAME CACHE ==============
 USERNAME_CACHE = {}  # "username_lower" -> (user_id_str, first_name)
+UID_USERNAME = {}    # "user_id_str" -> "username_lower"
 
 def track_user(user):
-    """Cache username -> user_id mapping for mention resolution."""
+    """Cache username <-> user_id mapping for mention resolution."""
     if user and getattr(user, 'username', None):
-        USERNAME_CACHE[user.username.lower()] = (str(user.id), user.first_name or "User")
+        uname = user.username.lower()
+        uid_s = str(user.id)
+        USERNAME_CACHE[uname] = (uid_s, user.first_name or "User")
+        UID_USERNAME[uid_s] = uname
         logger.info(f"[TRACK] Cached @{user.username} = {user.id} ({user.first_name})")
 
 # ============= MENTION/TAG EXTRACTION =========
@@ -366,13 +370,19 @@ def extract_tag_texts(message):
     return tags
 
 def is_subscriber_tagged(sub_uid, sub_name, tags):
-    """Check if a subscriber matches any tag by uid or name."""
+    """Check if a subscriber matches any tag by uid, name, or cached username."""
     sub_uid_s = str(sub_uid)
     sub_name_l = sub_name.lower().strip()
+    sub_uname = UID_USERNAME.get(sub_uid_s, "")  # subscriber's cached username
     for tag in tags:
+        # Match by user_id (if tag was resolved via cache or text_mention)
         if tag["uid"] and tag["uid"] == sub_uid_s:
             return True
+        # Match subscriber's first_name against tag names
         if sub_name_l in tag["names"]:
+            return True
+        # Match subscriber's cached username against tag names
+        if sub_uname and sub_uname in tag["names"]:
             return True
     return False
 
@@ -831,13 +841,15 @@ async def finish_group_remind(target, ctx, uid, ud, rep, edit_msg=False):
         # Add ALL subscribers but mark non-tagged as "skipped"
         tagged_names = []
         for sub_uid, sub_name in subs:
+            sub_uname = UID_USERNAME.get(str(sub_uid), "(no cache)")
+            logger.info(f"[FINISH_GRP] Checking sub: uid={sub_uid}, name={sub_name}, cached_uname={sub_uname}")
             if is_subscriber_tagged(sub_uid, sub_name, tags):
                 add_tmember(tid, sub_uid, sub_name, "waiting")
                 tagged_names.append(sub_name)
-                logger.info(f"[FINISH_GRP] TAGGED: {sub_name} ({sub_uid})")
+                logger.info(f"[FINISH_GRP] ✅ TAGGED: {sub_name} ({sub_uid})")
             else:
                 add_tmember(tid, sub_uid, sub_name, "skipped")
-                logger.info(f"[FINISH_GRP] SKIPPED: {sub_name} ({sub_uid})")
+                logger.info(f"[FINISH_GRP] ❌ SKIPPED: {sub_name} ({sub_uid})")
         sub_info = f"For: {', '.join(tagged_names)}" if tagged_names else "No matching subscribers"
     else:
         # No tags — add all subscribers as waiting
