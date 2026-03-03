@@ -325,6 +325,15 @@ def advance_rep_grp(row, r, tid):
         if str(tr[0]) == str(tid) and str(tr[3]) != "skipped": task_sheet.update_cell(i, 4, "waiting")
     return True
 
+# ============= USERNAME CACHE ==============
+USERNAME_CACHE = {}  # "username_lower" -> (user_id_str, first_name)
+
+def track_user(user):
+    """Cache username -> user_id mapping for mention resolution."""
+    if user and getattr(user, 'username', None):
+        USERNAME_CACHE[user.username.lower()] = (str(user.id), user.first_name or "User")
+        logger.info(f"[TRACK] Cached @{user.username} = {user.id} ({user.first_name})")
+
 # ============= MENTION EXTRACTION =========
 async def extract_mentions(message, bot):
     """Extract tagged users from both text_mention and @username mentions."""
@@ -344,18 +353,29 @@ async def extract_mentions(message, bot):
                 logger.info(f"[MENTION] text_mention resolved: {uid} = {entity.user.first_name}")
         # mention: @username typed or selected from autocomplete
         elif entity.type == "mention":
-            username = (message.text or "")[entity.offset:entity.offset + entity.length]
-            logger.info(f"[MENTION] Trying to resolve @mention: {username}")
+            raw_username = (message.text or "")[entity.offset:entity.offset + entity.length]
+            clean_username = raw_username.lstrip("@").lower()
+            logger.info(f"[MENTION] Trying to resolve @mention: {raw_username}")
+            # Try cache first (most reliable)
+            cached = USERNAME_CACHE.get(clean_username)
+            if cached:
+                uid, name = cached
+                if uid not in seen_ids:
+                    tagged.append((uid, name))
+                    seen_ids.add(uid)
+                    logger.info(f"[MENTION] Cache hit: @{clean_username} = {uid} ({name})")
+                continue
+            # Fallback: try bot.get_chat (works if user started bot privately)
             try:
-                chat = await bot.get_chat(username)
+                chat = await bot.get_chat(raw_username)
                 if chat and chat.id:
                     uid = str(chat.id)
                     if uid not in seen_ids:
-                        tagged.append((uid, chat.first_name or username.lstrip("@")))
+                        tagged.append((uid, chat.first_name or clean_username))
                         seen_ids.add(uid)
-                        logger.info(f"[MENTION] @mention resolved: {uid} = {chat.first_name}")
+                        logger.info(f"[MENTION] bot.get_chat resolved: {uid} = {chat.first_name}")
             except Exception as e:
-                logger.warning(f"[MENTION] Could not resolve {username}: {e}")
+                logger.warning(f"[MENTION] Could not resolve @{clean_username}: {e}")
     logger.info(f"[MENTION] Final tagged list: {tagged}")
     return tagged
 
@@ -637,6 +657,7 @@ async def auto_minimize(ctx: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
+        track_user(update.effective_user)
         gid = str(update.effective_chat.id)
         sent = await update.message.reply_text(GRP_START, reply_markup=gclose_kb(), parse_mode="HTML")
         show_cb = f"gshow_start_{sent.message_id}"
@@ -662,6 +683,7 @@ async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
+        track_user(update.effective_user)
         gid = str(update.effective_chat.id)
         list_text, items = build_grp_list_text(gid)
         if not list_text:
@@ -709,6 +731,7 @@ async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         await update.message.reply_text("Use /remind in groups.\nJust type naturally for personal reminders."); return
 
+    track_user(update.effective_user)
     ud = ctx.user_data; ud.clear()
     uid = update.effective_user.id
     utz = get_tz(uid)
@@ -989,6 +1012,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _btn_group(q, ctx, uid, data):
     uid_s = str(uid)
+    track_user(q.from_user)
     if data.startswith("gjoin_"):
         tid = data[6:]
         row, r = find_by_tid(tid)
@@ -1278,6 +1302,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if update.effective_chat.type != "private":
+        track_user(update.effective_user)
         # In groups: handle g_ steps if in correct group
         if step.startswith("g_") and str(update.effective_chat.id) == str(ctx.user_data.get("g_chat", "")):
             await _do_step(update, ctx, step, text)
