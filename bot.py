@@ -253,7 +253,7 @@ def grp_read(sheet_ref, filter_fn):
 
 def get_gsubs(gid):
     """Returns list of (user_id, first_name, username) for subscribed members."""
-    return [(r[1], r[2], r[3] if len(r) > 3 else "") for r in grp_read(grp_sheet, lambda r: str(r[0]) == str(gid) and str(r[4] if len(r) > 4 else r[3]).lower() == "true")]
+    return [(r[1], r[2], r[3] if len(r) > 4 else "") for r in grp_read(grp_sheet, lambda r: str(r[0]) == str(gid) and str(r[4] if len(r) > 4 else r[3]).lower() == "true")]
 
 def set_gsub(gid, uid, name, username="", sub=True):
     """Set group subscription. Stores username for tagging."""
@@ -635,6 +635,8 @@ def get_username(user):
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         gid = str(update.effective_chat.id)
+        user = update.effective_user
+        set_gsub(gid, user.id, user.first_name or "User", get_username(user), True)
         sent = await update.message.reply_text(GRP_START, reply_markup=gclose_kb(), parse_mode="HTML")
         show_cb = f"gshow_start_{sent.message_id}"
         ctx.bot_data[f"gstart_{sent.message_id}"] = {"c": gid, "text": GRP_START}
@@ -660,6 +662,8 @@ async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         gid = str(update.effective_chat.id)
+        user = update.effective_user
+        set_gsub(gid, user.id, user.first_name or "User", get_username(user), True)
         list_text, items = build_grp_list_text(gid)
         if not list_text:
             sent = await update.message.reply_text(f"{hdr('Group Reminders')}\nNo active reminders.", reply_markup=gclose_kb(), parse_mode="HTML")
@@ -1028,6 +1032,8 @@ async def _btn_group(q, ctx, uid, data):
         tid = data[6:]
         row, r = find_by_tid(tid)
         if not r or str(r[5]) != "active": await q.answer("Already fired.", show_alert=True); return
+        # Store username on skip too
+        set_gsub(str(q.message.chat.id), uid_s, user.first_name or "User", uname, True)
         ms = get_tmembers(tid)
         if any(str(u) == uid_s for u, _, _ in ms): set_tstatus(tid, uid_s, "skipped")
         else: add_tmember(tid, uid_s, user.first_name or "User", "skipped")
