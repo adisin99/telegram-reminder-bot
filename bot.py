@@ -99,7 +99,7 @@ def get_or_create_sheet(name, headers):
 
 sheet = get_or_create_sheet("Reminders", ["user_id", "message", "date", "time", "repeat", "status", "retry_count", "group_id", "task_id"])
 cfg_sheet = get_or_create_sheet("Settings", ["user_id", "digest_on", "digest_time", "max_retries", "retry_gap", "timezone"])
-grp_sheet = get_or_create_sheet("GroupMembers", ["group_id", "user_id", "first_name", "subscribed"])
+grp_sheet = get_or_create_sheet("GroupMembers", ["group_id", "user_id", "first_name", "username", "subscribed"])
 task_sheet = get_or_create_sheet("TaskMembers", ["task_id", "user_id", "first_name", "status"])
 
 # ============= FORMATTERS ================
@@ -252,16 +252,22 @@ def grp_read(sheet_ref, filter_fn):
     return [r for r in rows[1:] if filter_fn(r)]
 
 def get_gsubs(gid):
-    return [(r[1], r[2]) for r in grp_read(grp_sheet, lambda r: str(r[0]) == str(gid) and str(r[3]).lower() == "true")]
+    """Returns list of (user_id, first_name, username) for subscribed members."""
+    return [(r[1], r[2], r[3] if len(r) > 3 else "") for r in grp_read(grp_sheet, lambda r: str(r[0]) == str(gid) and str(r[4] if len(r) > 4 else r[3]).lower() == "true")]
 
-def set_gsub(gid, uid, name, sub=True):
+def set_gsub(gid, uid, name, username="", sub=True):
+    """Set group subscription. Stores username for tagging."""
     gid_s, uid_s = str(gid), str(uid)
+    uname = username.lower().strip() if username else ""
     try: rows = grp_sheet.get_all_values()
     except Exception: rows = [["h"]]
     for i, r in enumerate(rows[1:], 2):
         if str(r[0]) == gid_s and str(r[1]) == uid_s:
-            grp_sheet.update_cell(i, 3, name); grp_sheet.update_cell(i, 4, str(sub).lower()); return
-    grp_sheet.append_row([gid_s, uid_s, name, str(sub).lower()], value_input_option="RAW")
+            grp_sheet.update_cell(i, 3, name)
+            grp_sheet.update_cell(i, 4, uname)
+            grp_sheet.update_cell(i, 5, str(sub).lower())
+            return
+    grp_sheet.append_row([gid_s, uid_s, name, uname, str(sub).lower()], value_input_option="RAW")
 
 def get_tmembers(tid):
     return [(r[1], r[2], r[3]) for r in grp_read(task_sheet, lambda r: str(r[0]) == str(tid))]
@@ -325,66 +331,26 @@ def advance_rep_grp(row, r, tid):
         if str(tr[0]) == str(tid) and str(tr[3]) != "skipped": task_sheet.update_cell(i, 4, "waiting")
     return True
 
-# ============= USERNAME CACHE ==============
-USERNAME_CACHE = {}  # "username_lower" -> (user_id_str, first_name)
-UID_USERNAME = {}    # "user_id_str" -> "username_lower"
-
-def track_user(user):
-    """Cache username <-> user_id mapping for mention resolution."""
-    if user and getattr(user, 'username', None):
-        uname = user.username.lower()
-        uid_s = str(user.id)
-        USERNAME_CACHE[uname] = (uid_s, user.first_name or "User")
-        UID_USERNAME[uid_s] = uname
-        logger.info(f"[TRACK] Cached @{user.username} = {user.id} ({user.first_name})")
-
-# ============= MENTION/TAG EXTRACTION =========
-def extract_tag_texts(message):
-    """Extract tag identifiers for matching against subscriber names. No API calls needed."""
+# ============= TAG EXTRACTION (SIMPLE) =========
+def extract_tags(message):
+    """Extract lowercase tag strings from mentions. No API calls, no cache."""
     tags = []
     if not message.entities:
         return tags
     for entity in message.entities:
         if entity.type == "text_mention" and entity.user:
-            # User selected from autocomplete — has full user object
-            uid = str(entity.user.id)
-            names = set()
-            if entity.user.first_name: names.add(entity.user.first_name.lower().strip())
-            if entity.user.username: names.add(entity.user.username.lower().strip())
-            tags.append({"uid": uid, "names": names})
-            logger.info(f"[TAG] text_mention: uid={uid}, names={names}")
+            # Autocomplete selection — user object available
+            if entity.user.first_name:
+                tags.append(entity.user.first_name.lower().strip())
+            if entity.user.username:
+                tags.append(entity.user.username.lower().strip())
         elif entity.type == "mention":
-            # @username typed or selected — extract raw text
+            # @username typed or selected
             raw = (message.text or "")[entity.offset:entity.offset + entity.length]
             clean = raw.lstrip("@").lower().strip()
-            names = {clean}
-            # Try cache for uid + first_name
-            cached = USERNAME_CACHE.get(clean)
-            uid = None
-            if cached:
-                uid = cached[0]
-                names.add(cached[1].lower().strip())
-            tags.append({"uid": uid, "names": names})
-            logger.info(f"[TAG] @mention: raw={raw}, uid={uid}, names={names}")
-    logger.info(f"[TAG] Final tags: {tags}")
+            if clean:
+                tags.append(clean)
     return tags
-
-def is_subscriber_tagged(sub_uid, sub_name, tags):
-    """Check if a subscriber matches any tag by uid, name, or cached username."""
-    sub_uid_s = str(sub_uid)
-    sub_name_l = sub_name.lower().strip()
-    sub_uname = UID_USERNAME.get(sub_uid_s, "")  # subscriber's cached username
-    for tag in tags:
-        # Match by user_id (if tag was resolved via cache or text_mention)
-        if tag["uid"] and tag["uid"] == sub_uid_s:
-            return True
-        # Match subscriber's first_name against tag names
-        if sub_name_l in tag["names"]:
-            return True
-        # Match subscriber's cached username against tag names
-        if sub_uname and sub_uname in tag["names"]:
-            return True
-    return False
 
 def strip_mentions(text, message):
     if not message.entities: return text
@@ -662,9 +628,12 @@ async def auto_minimize(ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML")
     except Exception: pass
 
+def get_username(user):
+    """Get username from telegram user object, empty string if none."""
+    return user.username.lower().strip() if user and getattr(user, 'username', None) else ""
+
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        track_user(update.effective_user)
         gid = str(update.effective_chat.id)
         sent = await update.message.reply_text(GRP_START, reply_markup=gclose_kb(), parse_mode="HTML")
         show_cb = f"gshow_start_{sent.message_id}"
@@ -690,7 +659,6 @@ async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        track_user(update.effective_user)
         gid = str(update.effective_chat.id)
         list_text, items = build_grp_list_text(gid)
         if not list_text:
@@ -738,16 +706,20 @@ async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         await update.message.reply_text("Use /remind in groups.\nJust type naturally for personal reminders."); return
 
-    track_user(update.effective_user)
     ud = ctx.user_data; ud.clear()
     uid = update.effective_user.id
     utz = get_tz(uid)
     gid = str(update.effective_chat.id)
-    name = update.effective_user.first_name or "User"
+    user = update.effective_user
+    name = user.first_name or "User"
+    uname = get_username(user)
     ud["g_chat"], ud["g_name"] = gid, name
 
-    # Extract tag texts for matching against subscribers (no API calls)
-    tags = extract_tag_texts(update.message)
+    # Auto-subscribe the creator
+    set_gsub(gid, uid, name, uname, True)
+
+    # Extract tags for matching against subscriber usernames/names
+    tags = extract_tags(update.message)
     logger.info(f"[REMIND] Tags extracted: {tags}")
     if tags: ud["g_tags"] = tags
 
@@ -756,7 +728,6 @@ async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = strip_mentions(text, update.message)
 
     if not text:
-        # Step-by-step: use ForceReply so bot receives text in privacy mode
         ud["step"] = "g_message"
         sent = await update.message.reply_text(
             f"{hdr('Group Reminder')}\nType your reminder message:\n<i>↩️ Reply to this message</i>",
@@ -787,7 +758,8 @@ async def settings_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def get_user_groups(uid):
     uid_s = str(uid)
     gids = []
-    for r in grp_read(grp_sheet, lambda r: str(r[1]) == uid_s and str(r[3]).lower() == "true"):
+    # subscribed is now column index 4 (0-based) = col 5 in sheet
+    for r in grp_read(grp_sheet, lambda r: str(r[1]) == uid_s and len(r) > 4 and str(r[4]).lower() == "true"):
         if r[0] not in gids: gids.append(r[0])
     return gids
 
@@ -829,31 +801,43 @@ async def finish_group_remind(target, ctx, uid, ud, rep, edit_msg=False):
     msg, ds, ts = ud.get("message", ""), ud.get("date", ""), ud.get("time", "")
     gid = ud.get("g_chat", "")
     name = ud.get("g_name", "User")
-    tags = ud.get("g_tags")  # list of {"uid": ..., "names": set(...)}
+    tags = ud.get("g_tags")  # list of lowercase strings like ["akram_das", "john"]
     tid = gen_tid()
 
     sheet.append_row([uid, msg, ds, ts, rep, "active", 0, gid, tid], value_input_option="RAW")
 
+    # get_gsubs returns (user_id, first_name, username)
     subs = get_gsubs(gid)
-    logger.info(f"[FINISH_GRP] tags={tags}, gid={gid}, tid={tid}, subs={len(subs)}")
+    logger.info(f"[FINISH_GRP] tags={tags}, gid={gid}, tid={tid}, subs_count={len(subs)}")
 
     if tags:
-        # Add ALL subscribers but mark non-tagged as "skipped"
+        # Tags present — match against subscriber username and first_name
         tagged_names = []
-        for sub_uid, sub_name in subs:
-            sub_uname = UID_USERNAME.get(str(sub_uid), "(no cache)")
-            logger.info(f"[FINISH_GRP] Checking sub: uid={sub_uid}, name={sub_name}, cached_uname={sub_uname}")
-            if is_subscriber_tagged(sub_uid, sub_name, tags):
+        for sub_uid, sub_name, sub_uname in subs:
+            sub_name_l = sub_name.lower().strip()
+            sub_uname_l = sub_uname.lower().strip() if sub_uname else ""
+
+            # Check if any tag matches this subscriber's username or first_name
+            matched = False
+            for tag in tags:
+                if tag == sub_uname_l and sub_uname_l:
+                    matched = True; break
+                if tag == sub_name_l:
+                    matched = True; break
+
+            if matched:
                 add_tmember(tid, sub_uid, sub_name, "waiting")
                 tagged_names.append(sub_name)
-                logger.info(f"[FINISH_GRP] ✅ TAGGED: {sub_name} ({sub_uid})")
+                logger.info(f"[FINISH_GRP] ✅ MATCHED: {sub_name} (username={sub_uname})")
             else:
                 add_tmember(tid, sub_uid, sub_name, "skipped")
-                logger.info(f"[FINISH_GRP] ❌ SKIPPED: {sub_name} ({sub_uid})")
+                logger.info(f"[FINISH_GRP] ❌ SKIPPED: {sub_name} (username={sub_uname})")
+
         sub_info = f"For: {', '.join(tagged_names)}" if tagged_names else "No matching subscribers"
     else:
         # No tags — add all subscribers as waiting
-        for sub_uid, sub_name in subs: add_tmember(tid, sub_uid, sub_name)
+        for sub_uid, sub_name, sub_uname in subs:
+            add_tmember(tid, sub_uid, sub_name)
         sub_info = gsub_text(tid)
 
     txt = f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, fmt_rep(rep))}\nBy {name}\n\n{sub_info}"
@@ -956,7 +940,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if stored:
             await safe_edit(q.message, stored["min_text"], gmin_kb(stored["show_cb"]))
         else:
-            # Fallback: generic minimize
             await safe_edit(q.message, "<b>ℹ️</b>", gmin_kb(f"gshow_generic_{mid}"))
         return
 
@@ -972,11 +955,8 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("gshow_list_"):
         parts = data[11:]
         sep = parts.rfind("_")
-        if sep > 0:
-            gid = parts[:sep]
-        else:
-            gid = str(q.message.chat.id)
-        # Re-fetch fresh list data
+        if sep > 0: gid = parts[:sep]
+        else: gid = str(q.message.chat.id)
         list_text, items = build_grp_list_text(gid)
         if list_text:
             await safe_edit(q.message, list_text, gclose_kb())
@@ -984,7 +964,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await safe_edit(q.message, f"{hdr('Group Reminders')}\nNo active reminders.", gclose_kb())
         return
     if data.startswith("gshow_generic_"):
-        # Generic fallback — can't recover original text, just show bot name
         await safe_edit(q.message, GRP_START, gclose_kb())
         return
 
@@ -1031,13 +1010,16 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _btn_group(q, ctx, uid, data):
     uid_s = str(uid)
-    track_user(q.from_user)
+    user = q.from_user
+    uname = get_username(user)
+
     if data.startswith("gjoin_"):
         tid = data[6:]
         row, r = find_by_tid(tid)
         if not r or str(r[5]) != "active": await q.answer("Already fired.", show_alert=True); return
-        if not add_tmember(tid, uid_s, q.from_user.first_name or "User"): await q.answer("Already joined!", show_alert=True); return
-        set_gsub(str(q.message.chat.id), uid_s, q.from_user.first_name or "User", True)
+        if not add_tmember(tid, uid_s, user.first_name or "User"): await q.answer("Already joined!", show_alert=True); return
+        # Auto-subscribe to group + store username
+        set_gsub(str(q.message.chat.id), uid_s, user.first_name or "User", uname, True)
         msg, ds, ts, rs = get_detail(r)
         rep = r[4] if len(r) > 4 else "none"
         await safe_edit(q.message, f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, rs)}\n\n{gsub_text(tid)}", gjoin_kb(tid, rep == "none"))
@@ -1048,7 +1030,7 @@ async def _btn_group(q, ctx, uid, data):
         if not r or str(r[5]) != "active": await q.answer("Already fired.", show_alert=True); return
         ms = get_tmembers(tid)
         if any(str(u) == uid_s for u, _, _ in ms): set_tstatus(tid, uid_s, "skipped")
-        else: add_tmember(tid, uid_s, q.from_user.first_name or "User", "skipped")
+        else: add_tmember(tid, uid_s, user.first_name or "User", "skipped")
         msg, ds, ts, rs = get_detail(r)
         rep = r[4] if len(r) > 4 else "none"
         await safe_edit(q.message, f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, rs)}\n\n{gsub_text(tid)}", gjoin_kb(tid, rep == "none"))
@@ -1135,7 +1117,6 @@ async def _btn_cal(q, ctx, ud, uid, data):
                     await finish_group_remind(q.message, ctx, uid, ud, rep, edit_msg=True)
             else:
                 ud["step"] = "g_time"
-                # Use ForceReply for group time input
                 try: await q.message.delete()
                 except Exception: pass
                 sent = await ctx.bot.send_message(
@@ -1296,7 +1277,8 @@ async def _btn_cfg(q, ctx, ud, uid, data):
             rows = grp_sheet.get_all_values()
             for i, r in enumerate(rows[1:], 2):
                 if str(r[0]) == gid_s and str(r[1]) == uid_s:
-                    grp_sheet.update_cell(i, 4, "false"); break
+                    # subscribed is now col 5
+                    grp_sheet.update_cell(i, 5, "false"); break
         except Exception: pass
         grps = get_user_groups(uid)
         if not grps:
@@ -1321,7 +1303,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if update.effective_chat.type != "private":
-        track_user(update.effective_user)
         # In groups: handle g_ steps if in correct group
         if step.startswith("g_") and str(update.effective_chat.id) == str(ctx.user_data.get("g_chat", "")):
             await _do_step(update, ctx, step, text)
