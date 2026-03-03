@@ -330,17 +330,22 @@ async def extract_mentions(message, bot):
     """Extract tagged users from both text_mention and @username mentions."""
     tagged = []
     seen_ids = set()
-    if not message.entities: return tagged
+    if not message.entities:
+        logger.info("[MENTION] No entities found in message")
+        return tagged
     for entity in message.entities:
-        # text_mention: user selected from autocomplete (no username)
+        logger.info(f"[MENTION] Entity: type={entity.type}, offset={entity.offset}, length={entity.length}, user={getattr(entity, 'user', None)}")
+        # text_mention: user selected from autocomplete (has user object)
         if entity.type == "text_mention" and entity.user:
             uid = str(entity.user.id)
             if uid not in seen_ids:
                 tagged.append((uid, entity.user.first_name or "User"))
                 seen_ids.add(uid)
+                logger.info(f"[MENTION] text_mention resolved: {uid} = {entity.user.first_name}")
         # mention: @username typed or selected from autocomplete
         elif entity.type == "mention":
             username = (message.text or "")[entity.offset:entity.offset + entity.length]
+            logger.info(f"[MENTION] Trying to resolve @mention: {username}")
             try:
                 chat = await bot.get_chat(username)
                 if chat and chat.id:
@@ -348,8 +353,10 @@ async def extract_mentions(message, bot):
                     if uid not in seen_ids:
                         tagged.append((uid, chat.first_name or username.lstrip("@")))
                         seen_ids.add(uid)
-            except Exception:
-                logger.info(f"Could not resolve mention {username}")
+                        logger.info(f"[MENTION] @mention resolved: {uid} = {chat.first_name}")
+            except Exception as e:
+                logger.warning(f"[MENTION] Could not resolve {username}: {e}")
+    logger.info(f"[MENTION] Final tagged list: {tagged}")
     return tagged
 
 def strip_mentions(text, message):
@@ -711,6 +718,7 @@ async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Extract tagged members (both @username and text_mention)
     tagged = await extract_mentions(update.message, ctx.bot)
+    logger.info(f"[REMIND] Tagged result: {tagged}")
     if tagged: ud["g_tagged"] = tagged
 
     raw = update.message.text or ""
@@ -796,10 +804,14 @@ async def finish_group_remind(target, ctx, uid, ud, rep, edit_msg=False):
 
     sheet.append_row([uid, msg, ds, ts, rep, "active", 0, gid, tid], value_input_option="RAW")
 
+    logger.info(f"[FINISH_GRP] tagged={tagged}, gid={gid}, tid={tid}")
     if tagged:
+        logger.info(f"[FINISH_GRP] TAGGED BRANCH: adding only {len(tagged)} tagged users")
         for t_uid, t_name in tagged: add_tmember(tid, t_uid, t_name)
     else:
-        for sub_uid, sub_name in get_gsubs(gid): add_tmember(tid, sub_uid, sub_name)
+        subs = get_gsubs(gid)
+        logger.info(f"[FINISH_GRP] SUBSCRIBER BRANCH: adding {len(subs)} subscribers")
+        for sub_uid, sub_name in subs: add_tmember(tid, sub_uid, sub_name)
 
     sub_info = f"For: {', '.join(n for _, n in tagged)}" if tagged else gsub_text(tid)
     txt = f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, fmt_rep(rep))}\nBy {name}\n\n{sub_info}"
