@@ -424,6 +424,12 @@ def cfg_picker_kb(values, fmt_fn, cur, cb_prefix):
     btns.append([InlineKeyboardButton("« Back", callback_data="cfg_back")])
     return InlineKeyboardMarkup(btns)
 
+def gmin_kb(show_cb):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=show_cb), InlineKeyboardButton("✕ Close", callback_data="gclose")]])
+
+def gclose_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✕ Close", callback_data="gclose")]])
+
 # ============= CALENDAR ==================
 def cal_kb(year, month, back_cb="cancel", back_txt="✕ Cancel", tz=None):
     now = datetime.now(tz or safe_tz(DEF_TZ))
@@ -552,9 +558,17 @@ def parse_nl_partial(text, tz=None):
 
 # ============= COMMANDS ===================
 async def post_init(app):
-    await app.bot.set_my_commands([BotCommand("list", "All reminders"),
-        BotCommand("settings", "Bot settings"), BotCommand("info", "About this bot")], scope=BotCommandScopeAllPrivateChats())
-    await app.bot.set_my_commands([BotCommand("remind", "Group reminder"), BotCommand("list", "Active reminders")], scope=BotCommandScopeAllGroupChats())
+    await app.bot.set_my_commands([
+        BotCommand("add", "New reminder"),
+        BotCommand("list", "All reminders"),
+        BotCommand("settings", "Bot settings"),
+        BotCommand("info", "About this bot"),
+    ], scope=BotCommandScopeAllPrivateChats())
+    await app.bot.set_my_commands([
+        BotCommand("start", "Bot info & commands"),
+        BotCommand("remind", "Group reminder"),
+        BotCommand("list", "Active reminders"),
+    ], scope=BotCommandScopeAllGroupChats())
     await app.bot.set_my_commands([])
 
 GRP_START = (f"{hdr('Smart Reminder Bot')}\n\n"
@@ -568,16 +582,42 @@ GRP_START = (f"{hdr('Smart Reminder Bot')}\n\n"
     "<i>Tag members to assign:</i>\n"
     "<code>/remind @John Submit report at 5pm</code>")
 
-async def auto_del(ctx: ContextTypes.DEFAULT_TYPE):
-    try: await ctx.bot.delete_message(chat_id=ctx.job.data["c"], message_id=ctx.job.data["m"])
+GRP_START_MIN = "<b>Smart Reminder Bot</b>"
+
+def build_grp_list_text(gid):
+    try: rows = sheet.get_all_values()
+    except Exception: rows = []
+    items = [(i, r) for i, r in enumerate(rows[1:], 2)
+             if len(r) > 7 and str(r[7]).strip() == str(gid) and str(r[5]).strip() in ("active", "pending", "snoozed")]
+    if not items: return None, []
+    lines = [hdr("Group Reminders")]
+    for idx, (ri, r) in enumerate(items, 1):
+        st, msg = str(r[5]).strip(), str(r[1]).strip()
+        short = msg[:30] + "…" if len(msg) > 30 else msg
+        lines.append(f"\n<b>{idx}</b> {ST_IC.get(st,'?')} {short}\n   {fmt_date(norm_date(r[2]))} · {fmt_time(norm_time(r[3]))}")
+    return "\n".join(lines), items
+
+GRP_LIST_MIN = "<b>Group Reminders</b>"
+
+async def auto_minimize(ctx: ContextTypes.DEFAULT_TYPE):
+    d = ctx.job.data
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=d["c"], message_id=d["m"],
+            text=d["min_text"],
+            reply_markup=gmin_kb(d["show_cb"]),
+            parse_mode="HTML")
     except Exception: pass
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        sent = await update.message.reply_text(GRP_START,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✕ Close", callback_data="gclose")]]),
-            parse_mode="HTML")
-        ctx.job_queue.run_once(auto_del, 30, data={"c": sent.chat.id, "m": sent.message_id})
+        gid = str(update.effective_chat.id)
+        sent = await update.message.reply_text(GRP_START, reply_markup=gclose_kb(), parse_mode="HTML")
+        ctx.bot_data[f"gstart_{sent.message_id}"] = {"c": gid, "text": GRP_START}
+        ctx.job_queue.run_once(auto_minimize, 30, data={
+            "c": sent.chat.id, "m": sent.message_id,
+            "min_text": GRP_START_MIN, "show_cb": f"gshow_start_{sent.message_id}"
+        })
         return
     await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
     get_cfg(update.effective_user.id)
@@ -595,23 +635,20 @@ async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         gid = str(update.effective_chat.id)
-        try: rows = sheet.get_all_values()
-        except Exception: rows = []
-        items = [(i, r) for i, r in enumerate(rows[1:], 2)
-                 if len(r) > 7 and str(r[7]).strip() == gid and str(r[5]).strip() in ("active", "pending", "snoozed")]
-        if not items:
-            sent = await update.message.reply_text(f"{hdr('Group Reminders')}\nNo active reminders.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✕ Close", callback_data="gclose")]]), parse_mode="HTML")
-            ctx.job_queue.run_once(auto_del, 30, data={"c": sent.chat.id, "m": sent.message_id})
+        list_text, items = build_grp_list_text(gid)
+        if not list_text:
+            sent = await update.message.reply_text(f"{hdr('Group Reminders')}\nNo active reminders.", reply_markup=gclose_kb(), parse_mode="HTML")
+            ctx.job_queue.run_once(auto_minimize, 30, data={
+                "c": sent.chat.id, "m": sent.message_id,
+                "min_text": "<b>Group Reminders</b> — No active", "show_cb": f"gshow_list_{gid}_{sent.message_id}"
+            })
             return
-        lines = [hdr("Group Reminders")]
-        for idx, (ri, r) in enumerate(items, 1):
-            st, msg = str(r[5]).strip(), str(r[1]).strip()
-            short = msg[:30] + "…" if len(msg) > 30 else msg
-            lines.append(f"\n<b>{idx}</b> {ST_IC.get(st,'?')} {short}\n   {fmt_date(norm_date(r[2]))} · {fmt_time(norm_time(r[3]))}")
-        sent = await update.message.reply_text("\n".join(lines),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✕ Close", callback_data="gclose")]]), parse_mode="HTML")
-        ctx.job_queue.run_once(auto_del, 60, data={"c": sent.chat.id, "m": sent.message_id})
+        sent = await update.message.reply_text(list_text, reply_markup=gclose_kb(), parse_mode="HTML")
+        ctx.bot_data[f"glist_{sent.message_id}"] = {"c": gid, "text": list_text}
+        ctx.job_queue.run_once(auto_minimize, 60, data={
+            "c": sent.chat.id, "m": sent.message_id,
+            "min_text": GRP_LIST_MIN, "show_cb": f"gshow_list_{gid}_{sent.message_id}"
+        })
         return
     await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
     await show_list(update.message, update.effective_user.id, ctx.user_data, new=True)
@@ -633,7 +670,7 @@ async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "<b>Group Reminders</b>\n• Use /remind in groups\n"
         "• Tag members to assign specific people\n• Members opt in per reminder\n"
         "• Track who's done / pending / missed\n\n"
-        "<b>Commands</b>\n/list — All reminders\n/remind — Group reminder\n"
+        "<b>Commands</b>\n/add — New reminder\n/list — All reminders\n/remind — Group reminder\n"
         "/settings — Bot settings\n/info — This page", parse_mode="HTML")
 
 async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -826,6 +863,30 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try: await q.message.delete()
         except Exception: pass
         return
+
+    # Group show/minimize
+    if data.startswith("gshow_start_"):
+        mid = data[12:]
+        stored = ctx.bot_data.get(f"gstart_{mid}")
+        if stored:
+            await safe_edit(q.message, GRP_START, gclose_kb())
+        else:
+            await safe_edit(q.message, GRP_START, gclose_kb())
+        return
+    if data.startswith("gshow_list_"):
+        parts = data[11:]
+        sep = parts.rfind("_")
+        if sep > 0:
+            gid = parts[:sep]
+        else:
+            gid = str(q.message.chat.id)
+        list_text, items = build_grp_list_text(gid)
+        if list_text:
+            await safe_edit(q.message, list_text, gclose_kb())
+        else:
+            await safe_edit(q.message, f"{hdr('Group Reminders')}\nNo active reminders.", gclose_kb())
+        return
+
     if data == "add":
         await rm_home(ctx, ud); ud.clear(); ud["step"] = "message"
         sent = await q.message.reply_text(f"{hdr('New Reminder')}\nEnter message:", reply_markup=cancel_kb(), parse_mode="HTML")
@@ -1109,7 +1170,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
         grps = get_user_groups(uid)
         if not grps:
             await safe_edit(q.message, f"{hdr('Groups')}\n\nNo group subscriptions.",
-                InlineKeyboardMarkup([[InlineKeyboardButton('« Back', callback_data='cfg_back')]]))
+                InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="cfg_back")]]))
             return
         btns = []
         for gid in grps:
@@ -1442,4 +1503,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
