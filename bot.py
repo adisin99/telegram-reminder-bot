@@ -15,6 +15,7 @@ from telegram import (
     BotCommand,
     BotCommandScopeAllPrivateChats,
     BotCommandScopeAllGroupChats,
+    ForceReply,
 )
 
 from telegram.ext import (
@@ -325,12 +326,30 @@ def advance_rep_grp(row, r, tid):
     return True
 
 # ============= MENTION EXTRACTION =========
-def extract_mentions(message):
+async def extract_mentions(message, bot):
+    """Extract tagged users from both text_mention and @username mentions."""
     tagged = []
+    seen_ids = set()
     if not message.entities: return tagged
     for entity in message.entities:
+        # text_mention: user selected from autocomplete (no username)
         if entity.type == "text_mention" and entity.user:
-            tagged.append((str(entity.user.id), entity.user.first_name or "User"))
+            uid = str(entity.user.id)
+            if uid not in seen_ids:
+                tagged.append((uid, entity.user.first_name or "User"))
+                seen_ids.add(uid)
+        # mention: @username typed or selected from autocomplete
+        elif entity.type == "mention":
+            username = (message.text or "")[entity.offset:entity.offset + entity.length]
+            try:
+                chat = await bot.get_chat(username)
+                if chat and chat.id:
+                    uid = str(chat.id)
+                    if uid not in seen_ids:
+                        tagged.append((uid, chat.first_name or username.lstrip("@")))
+                        seen_ids.add(uid)
+            except Exception:
+                logger.info(f"Could not resolve mention {username}")
     return tagged
 
 def strip_mentions(text, message):
@@ -425,7 +444,7 @@ def cfg_picker_kb(values, fmt_fn, cur, cb_prefix):
     return InlineKeyboardMarkup(btns)
 
 def gmin_kb(show_cb):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=show_cb), InlineKeyboardButton("✕ Close", callback_data="gclose")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=show_cb)]])
 
 def gclose_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("✕ Close", callback_data="gclose")]])
@@ -613,10 +632,12 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         gid = str(update.effective_chat.id)
         sent = await update.message.reply_text(GRP_START, reply_markup=gclose_kb(), parse_mode="HTML")
+        show_cb = f"gshow_start_{sent.message_id}"
         ctx.bot_data[f"gstart_{sent.message_id}"] = {"c": gid, "text": GRP_START}
+        ctx.bot_data[f"gmin_{sent.message_id}"] = {"min_text": GRP_START_MIN, "show_cb": show_cb}
         ctx.job_queue.run_once(auto_minimize, 30, data={
             "c": sent.chat.id, "m": sent.message_id,
-            "min_text": GRP_START_MIN, "show_cb": f"gshow_start_{sent.message_id}"
+            "min_text": GRP_START_MIN, "show_cb": show_cb
         })
         return
     await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
@@ -638,16 +659,20 @@ async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         list_text, items = build_grp_list_text(gid)
         if not list_text:
             sent = await update.message.reply_text(f"{hdr('Group Reminders')}\nNo active reminders.", reply_markup=gclose_kb(), parse_mode="HTML")
+            show_cb = f"gshow_list_{gid}_{sent.message_id}"
+            ctx.bot_data[f"gmin_{sent.message_id}"] = {"min_text": "<b>Group Reminders</b> — No active", "show_cb": show_cb}
             ctx.job_queue.run_once(auto_minimize, 30, data={
                 "c": sent.chat.id, "m": sent.message_id,
-                "min_text": "<b>Group Reminders</b> — No active", "show_cb": f"gshow_list_{gid}_{sent.message_id}"
+                "min_text": "<b>Group Reminders</b> — No active", "show_cb": show_cb
             })
             return
         sent = await update.message.reply_text(list_text, reply_markup=gclose_kb(), parse_mode="HTML")
+        show_cb = f"gshow_list_{gid}_{sent.message_id}"
         ctx.bot_data[f"glist_{sent.message_id}"] = {"c": gid, "text": list_text}
+        ctx.bot_data[f"gmin_{sent.message_id}"] = {"min_text": GRP_LIST_MIN, "show_cb": show_cb}
         ctx.job_queue.run_once(auto_minimize, 60, data={
             "c": sent.chat.id, "m": sent.message_id,
-            "min_text": GRP_LIST_MIN, "show_cb": f"gshow_list_{gid}_{sent.message_id}"
+            "min_text": GRP_LIST_MIN, "show_cb": show_cb
         })
         return
     await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
@@ -684,7 +709,8 @@ async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "User"
     ud["g_chat"], ud["g_name"] = gid, name
 
-    tagged = extract_mentions(update.message)
+    # Extract tagged members (both @username and text_mention)
+    tagged = await extract_mentions(update.message, ctx.bot)
     if tagged: ud["g_tagged"] = tagged
 
     raw = update.message.text or ""
@@ -692,9 +718,12 @@ async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = strip_mentions(text, update.message)
 
     if not text:
+        # Step-by-step: use ForceReply so bot receives text in privacy mode
         ud["step"] = "g_message"
-        sent = await update.message.reply_text(f"{hdr('Group Reminder')}\nEnter message:",
-            reply_markup=gcancel_kb(), parse_mode="HTML")
+        sent = await update.message.reply_text(
+            f"{hdr('Group Reminder')}\nType your reminder message:\n<i>↩️ Reply to this message</i>",
+            reply_markup=ForceReply(selective=True, input_field_placeholder="Type your reminder..."),
+            parse_mode="HTML")
         save_p(ud, sent)
         return
 
@@ -807,9 +836,15 @@ async def handle_nl_result(target, ctx, uid, ud, msg, ts, ds, utz, is_group=Fals
         ud["date"] = ds
         ud["step"] = "g_time" if is_group else "time"
         title = "Group Reminder" if is_group else "New Reminder"
-        cancel = gcancel_kb() if is_group else cancel_kb()
-        sent = await target.reply_text(f"{hdr(title)}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
-            reply_markup=cancel, parse_mode="HTML")
+        if is_group:
+            sent = await target.reply_text(
+                f"{hdr(title)}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>↩️ Reply to this message</i>\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
+                reply_markup=ForceReply(selective=True, input_field_placeholder="e.g. 9pm, 9:30 PM"),
+                parse_mode="HTML")
+        else:
+            cancel = cancel_kb()
+            sent = await target.reply_text(f"{hdr(title)}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
+                reply_markup=cancel, parse_mode="HTML")
         save_p(ud, sent)
     else:
         ud["step"] = "g_date" if is_group else "date"
@@ -859,17 +894,24 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ud.clear(); await safe_edit(q.message, HOME_TEXT, home_kb()); save_home(ud, q.message); return
     if data == "gcancel":
         ud.clear(); await safe_edit(q.message, f"{hdr('Group Reminder')}\n\nCancelled."); return
+
+    # Group close → MINIMIZE (not delete)
     if data == "gclose":
-        try: await q.message.delete()
-        except Exception: pass
+        mid = str(q.message.message_id)
+        stored = ctx.bot_data.get(f"gmin_{mid}")
+        if stored:
+            await safe_edit(q.message, stored["min_text"], gmin_kb(stored["show_cb"]))
+        else:
+            # Fallback: generic minimize
+            await safe_edit(q.message, "<b>ℹ️</b>", gmin_kb(f"gshow_generic_{mid}"))
         return
 
-    # Group show/minimize
+    # Group show (expand from minimized)
     if data.startswith("gshow_start_"):
         mid = data[12:]
         stored = ctx.bot_data.get(f"gstart_{mid}")
         if stored:
-            await safe_edit(q.message, GRP_START, gclose_kb())
+            await safe_edit(q.message, stored["text"], gclose_kb())
         else:
             await safe_edit(q.message, GRP_START, gclose_kb())
         return
@@ -880,11 +922,16 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             gid = parts[:sep]
         else:
             gid = str(q.message.chat.id)
+        # Re-fetch fresh list data
         list_text, items = build_grp_list_text(gid)
         if list_text:
             await safe_edit(q.message, list_text, gclose_kb())
         else:
             await safe_edit(q.message, f"{hdr('Group Reminders')}\nNo active reminders.", gclose_kb())
+        return
+    if data.startswith("gshow_generic_"):
+        # Generic fallback — can't recover original text, just show bot name
+        await safe_edit(q.message, GRP_START, gclose_kb())
         return
 
     if data == "add":
@@ -1033,8 +1080,15 @@ async def _btn_cal(q, ctx, ud, uid, data):
                     await finish_group_remind(q.message, ctx, uid, ud, rep, edit_msg=True)
             else:
                 ud["step"] = "g_time"
-                await safe_edit(q.message, f"{hdr('Group Reminder')}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", gcancel_kb())
-                save_p(ud, q.message)
+                # Use ForceReply for group time input
+                try: await q.message.delete()
+                except Exception: pass
+                sent = await ctx.bot.send_message(
+                    chat_id=q.message.chat.id,
+                    text=f"{hdr('Group Reminder')}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>↩️ Reply to this message</i>\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
+                    reply_markup=ForceReply(selective=True, input_field_placeholder="e.g. 9pm, 9:30 PM"),
+                    parse_mode="HTML")
+                save_p(ud, sent)
 
         else:
             ud["date"] = ds
@@ -1212,6 +1266,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if update.effective_chat.type != "private":
+        # In groups: handle g_ steps if in correct group
         if step.startswith("g_") and str(update.effective_chat.id) == str(ctx.user_data.get("g_chat", "")):
             await _do_step(update, ctx, step, text)
         return
