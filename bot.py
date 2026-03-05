@@ -205,7 +205,6 @@ def save_cfg(uid, field, value):
         if str(r[0]) == uid_s: cfg_sheet.update_cell(i, col, str(value)); return
 
 def update_username(uid, username):
-    """Update username in Settings sheet (col 7)."""
     if not username: return
     uid_s, uname = str(uid), username.lower().strip()
     try: rows = cfg_sheet.get_all_values()
@@ -214,13 +213,8 @@ def update_username(uid, username):
         if str(r[0]) == uid_s:
             current = r[6].strip().lower() if len(r) > 6 else ""
             if current != uname:
-                # Pad row if needed (old rows may have only 6 cols)
-                if len(r) <= 6:
-                    cfg_sheet.update_cell(i, 7, uname)
-                else:
-                    cfg_sheet.update_cell(i, 7, uname)
+                cfg_sheet.update_cell(i, 7, uname)
             return
-    # User not found — get_cfg will create row, then update
     get_cfg(uid)
     try: rows = cfg_sheet.get_all_values()
     except Exception: return
@@ -277,11 +271,9 @@ def grp_read(sheet_ref, filter_fn):
     return [r for r in rows[1:] if filter_fn(r)]
 
 def get_gsubs(gid):
-    """Returns list of (user_id, first_name, username) for subscribed members."""
     return [(r[1], r[2], r[3] if len(r) > 4 else "") for r in grp_read(grp_sheet, lambda r: str(r[0]) == str(gid) and str(r[4] if len(r) > 4 else r[3]).lower() == "true")]
 
 def set_gsub(gid, uid, name, username="", sub=True):
-    """Set group subscription. Stores username for tagging."""
     gid_s, uid_s = str(gid), str(uid)
     uname = username.lower().strip() if username else ""
     try: rows = grp_sheet.get_all_values()
@@ -356,23 +348,18 @@ def advance_rep_grp(row, r, tid):
         if str(tr[0]) == str(tid) and str(tr[3]) != "skipped": task_sheet.update_cell(i, 4, "waiting")
     return True
 
-# ============= TAG EXTRACTION (SIMPLE) =========
+# ============= TAG EXTRACTION =========
 def extract_tags(message):
-    """Extract lowercase tag strings from mentions. No API calls, no cache."""
     tags = []
-    if not message.entities:
-        return tags
+    if not message.entities: return tags
     for entity in message.entities:
         if entity.type == "text_mention" and entity.user:
-            if entity.user.first_name:
-                tags.append(entity.user.first_name.lower().strip())
-            if entity.user.username:
-                tags.append(entity.user.username.lower().strip())
+            if entity.user.first_name: tags.append(entity.user.first_name.lower().strip())
+            if entity.user.username: tags.append(entity.user.username.lower().strip())
         elif entity.type == "mention":
             raw = (message.text or "")[entity.offset:entity.offset + entity.length]
             clean = raw.lstrip("@").lower().strip()
-            if clean:
-                tags.append(clean)
+            if clean: tags.append(clean)
     return tags
 
 def strip_mentions(text, message):
@@ -423,14 +410,25 @@ async def rm_gpm(ctx, tid, uid_s):
         except Exception: pass
 
 def get_username(user):
-    """Get username from telegram user object, empty string if none."""
     return user.username.lower().strip() if user and getattr(user, 'username', None) else ""
+
+async def p_auto_minimize(ctx: ContextTypes.DEFAULT_TYPE):
+    """Auto-minimize private messages (info/list)."""
+    d = ctx.job.data
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=d["c"], message_id=d["m"],
+            text=d["min_text"],
+            reply_markup=InlineKeyboardMarkup(d["min_kb"]),
+            parse_mode="HTML")
+    except Exception: pass
 
 # ============= UI ========================
 HOME_TEXT = (f"{hdr('Smart Reminder Bot')}\nType your reminder below:\n\n"
              "<i>Buy milk tomorrow at 5pm</i>\n"
              "<i>Gym at 6pm daily</i>\n"
-             "<i>Meeting Monday 10am weekly</i>\n\n"
+             "<i>Meeting Monday 10am weekly</i>\n"
+             "<i>Call mom in 30 min</i>\n\n"
              "Or tap ＋ New for step-by-step.\n"
              "Use /list to view all.")
 
@@ -535,6 +533,40 @@ def _find_time(text):
         if t: return t, m.start(), m.end()
     return None
 
+def _find_relative(text, tz=None):
+    """Find relative time like 'in 5 min', 'in 2 hours', 'in 3 days', 'after 30 min'."""
+    now = datetime.now(tz or safe_tz(DEF_TZ))
+    low = text.lower()
+    # "in X min/minutes/mins" or "after X min"
+    m = re.search(r'\b(?:in|after)\s+(\d+)\s*(?:min(?:ute)?s?|m)\b', low)
+    if m:
+        mins = int(m.group(1))
+        if mins > 0:
+            target = now + timedelta(minutes=mins)
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), m.start(), m.end()
+    # "in X hour/hours/hrs/hr/h" or "after X hours"
+    m = re.search(r'\b(?:in|after)\s+(\d+)\s*(?:hour|hr|h)s?\b', low)
+    if m:
+        hrs = int(m.group(1))
+        if hrs > 0:
+            target = now + timedelta(hours=hrs)
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), m.start(), m.end()
+    # "in X day/days" or "after X days"
+    m = re.search(r'\b(?:in|after)\s+(\d+)\s*days?\b', low)
+    if m:
+        days = int(m.group(1))
+        if days > 0:
+            target = now + timedelta(days=days)
+            return target.strftime("%Y-%m-%d"), now.strftime("%H:%M"), m.start(), m.end()
+    # "in X week/weeks"
+    m = re.search(r'\b(?:in|after)\s+(\d+)\s*weeks?\b', low)
+    if m:
+        weeks = int(m.group(1))
+        if weeks > 0:
+            target = now + timedelta(weeks=weeks)
+            return target.strftime("%Y-%m-%d"), now.strftime("%H:%M"), m.start(), m.end()
+    return None
+
 def _find_date(text, tz=None):
     now = datetime.now(tz or safe_tz(DEF_TZ))
     low = text.lower()
@@ -575,12 +607,31 @@ def _find_date(text, tz=None):
                 except ValueError: pass
     return None
 
-def _find_repeat(text):
+def _find_repeat(text, tz=None):
     low = text.lower()
-    for pat, val in [(r'\b(?:every\s*day|daily)\b', 'daily'), (r'\b(?:every\s*week|weekly)\b', 'weekly'),
-                      (r'\b(?:every\s*month|monthly)\b', 'monthly'), (r'\b(?:once|one[\s-]?time|no\s*repeat)\b', 'none')]:
-        m = re.search(pat, low)
-        if m: return val, m.start(), m.end()
+    now = datetime.now(tz or safe_tz(DEF_TZ))
+    # "every monday" etc → weekly + sets date to next occurrence of that day
+    days = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']
+    abbrs = ['mon','tue','wed','thu','fri','sat','sun']
+    for i, (full, abr) in enumerate(zip(days, abbrs)):
+        m = re.search(rf'\bevery\s+({full}|{abr})\b', low)
+        if m:
+            d = (i - now.weekday()) % 7
+            if d == 0: d = 0  # today if same day and time not passed yet
+            target = (now + timedelta(days=d)).strftime("%Y-%m-%d")
+            return 'weekly', m.start(), m.end(), target
+    # "every day" / "daily"
+    m = re.search(r'\b(?:every\s*day|daily)\b', low)
+    if m: return 'daily', m.start(), m.end(), None
+    # "every week" / "weekly"
+    m = re.search(r'\b(?:every\s*week|weekly)\b', low)
+    if m: return 'weekly', m.start(), m.end(), None
+    # "every month" / "monthly"
+    m = re.search(r'\b(?:every\s*month|monthly)\b', low)
+    if m: return 'monthly', m.start(), m.end(), None
+    # "once" / "one time"
+    m = re.search(r'\b(?:once|one[\s-]?time|no\s*repeat)\b', low)
+    if m: return 'none', m.start(), m.end(), None
     return None
 
 def _clean(text, spans):
@@ -594,11 +645,34 @@ def _clean(text, spans):
     return text[0].upper() + text[1:] if text else text
 
 def parse_nl_partial(text, tz=None):
-    tr, dr, rr = _find_time(text), _find_date(text, tz), _find_repeat(text)
+    # Check relative time first ("in 5 min", "in 2 hours", "in 3 days")
+    rel = _find_relative(text, tz)
+    if rel:
+        ds_rel, ts_rel, rs, re_ = rel
+        # Also check for repeat
+        rr = _find_repeat(text, tz)
+        rep = rr[0] if rr else None
+        spans = [(rs, re_)]
+        if rr: spans.append((rr[1], rr[2]))
+        msg = _clean(text, spans)
+        if not msg: return None
+        return {'message': msg, 'date': ds_rel, 'time': ts_rel, 'repeat': rep}
+
+    # Normal flow: time, date, repeat
+    tr = _find_time(text)
+    dr = _find_date(text, tz)
+    rr = _find_repeat(text, tz)
     ts = tr[0] if tr else None
     ds = dr[0] if dr else None
     rep = rr[0] if rr else None
-    msg = _clean(text, [(tr[1],tr[2]) if tr else None, (dr[1],dr[2]) if dr else None, (rr[1],rr[2]) if rr else None])
+    # "every monday" also sets date
+    if rr and len(rr) > 3 and rr[3]:
+        ds = rr[3]
+    spans = []
+    if tr: spans.append((tr[1], tr[2]))
+    if dr: spans.append((dr[1], dr[2]))
+    if rr: spans.append((rr[1], rr[2]))
+    msg = _clean(text, spans)
     if not msg: return None
     return {'message': msg, 'date': ds, 'time': ts, 'repeat': rep}
 
@@ -624,6 +698,7 @@ GRP_START = (f"{hdr('Smart Reminder Bot')}\n\n"
     "<b>Examples</b>\n"
     "<code>/remind Buy milk at 5pm</code>\n"
     "<code>/remind Meeting tomorrow 10am daily</code>\n"
+    "<code>/remind Call mom in 30 min</code>\n"
     "<code>/remind</code> — step-by-step\n\n"
     "<i>Tag members to assign:</i>\n"
     "<code>/remind @John Submit report at 5pm</code>")
@@ -711,28 +786,42 @@ async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
     update_username(update.effective_user.id, get_username(update.effective_user))
-    await show_list(update.message, update.effective_user.id, ctx.user_data, new=True)
+    await show_list(update.message, update.effective_user.id, ctx)
 
 async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.message.reply_text("Use /info in private chat."); return
     update_username(update.effective_user.id, get_username(update.effective_user))
     cfg = get_cfg(update.effective_user.id)
-    await update.message.reply_text(
+    info_text = (
         f"{hdr('Smart Reminder Bot')}\n\nSet reminders and get notified on time.\n\n"
         "<b>Smart Input</b>\nJust type naturally:\n"
         "<code>Buy milk tomorrow at 5pm</code>\n"
         "<code>Meeting Monday 10am weekly</code>\n"
-        "<code>Call mom at 3pm</code>\n\n"
+        "<code>Call mom in 30 min</code>\n"
+        "<code>Gym every monday at 6pm</code>\n"
+        "<code>Pay rent in 3 days at 9am</code>\n\n"
         "<i>Add \"daily\", \"weekly\" or \"monthly\"\nto set recurring reminders.</i>\n\n"
         "<b>Features</b>\n• One-time & recurring reminders\n• Calendar date picker\n• Flexible time input\n"
+        "• Relative time (in 5 min, in 2 hours)\n"
         "• Snooze (15m to 12h)\n• Auto-retry if missed\n• Edit or cancel anytime\n• Daily morning digest\n"
         f"• Per-user timezone ({tz_short(cfg['timezone'])})\n\n"
         "<b>Group Reminders</b>\n• Use /remind in groups\n"
         "• Tag members to assign specific people\n• Members opt in per reminder\n"
         "• Track who's done / pending / missed\n\n"
         "<b>Commands</b>\n/add — New reminder\n/list — All reminders\n/remind — Group reminder\n"
-        "/settings — Bot settings\n/info — This page", parse_mode="HTML")
+        "/settings — Bot settings\n/info — This page")
+    sent = await update.message.reply_text(info_text, parse_mode="HTML")
+    # Auto-minimize after 30s
+    min_text = "<b>ℹ️ Info</b>"
+    show_cb = f"pshow_info_{sent.message_id}"
+    min_kb_data = [[{"text": "📋 Show", "cb": show_cb}, {"text": "＋ New", "cb": "add"}]]
+    ctx.bot_data[f"pinfo_{sent.message_id}"] = {"text": info_text}
+    ctx.job_queue.run_once(p_auto_minimize, 30, data={
+        "c": sent.chat.id, "m": sent.message_id,
+        "min_text": min_text,
+        "min_kb": [[InlineKeyboardButton("📋 Show", callback_data=show_cb), InlineKeyboardButton("＋ New", callback_data="add")]]
+    })
 
 async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
@@ -747,10 +836,8 @@ async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uname = get_username(user)
     ud["g_chat"], ud["g_name"] = gid, name
 
-    # Auto-subscribe the creator
     set_gsub(gid, uid, name, uname, True)
 
-    # Extract tags for matching against subscriber usernames/names
     tags = extract_tags(update.message)
     logger.info(f"[REMIND] Tags extracted: {tags}")
     if tags: ud["g_tags"] = tags
@@ -833,41 +920,29 @@ async def finish_group_remind(target, ctx, uid, ud, rep, edit_msg=False):
     msg, ds, ts = ud.get("message", ""), ud.get("date", ""), ud.get("time", "")
     gid = ud.get("g_chat", "")
     name = ud.get("g_name", "User")
-    tags = ud.get("g_tags")  # list of lowercase strings like ["akram_das", "john"]
+    tags = ud.get("g_tags")
     tid = gen_tid()
 
     sheet.append_row([uid, msg, ds, ts, rep, "active", 0, gid, tid], value_input_option="RAW")
 
-    # get_gsubs returns (user_id, first_name, username)
     subs = get_gsubs(gid)
     logger.info(f"[FINISH_GRP] tags={tags}, gid={gid}, tid={tid}, subs_count={len(subs)}")
 
     if tags:
-        # Tags present — match against subscriber username and first_name
         tagged_names = []
         for sub_uid, sub_name, sub_uname in subs:
             sub_name_l = sub_name.lower().strip()
             sub_uname_l = sub_uname.lower().strip() if sub_uname else ""
-
-            # Check if any tag matches this subscriber's username or first_name
-            matched = False
-            for tag in tags:
-                if tag == sub_uname_l and sub_uname_l:
-                    matched = True; break
-                if tag == sub_name_l:
-                    matched = True; break
-
+            matched = any(tag == sub_uname_l and sub_uname_l for tag in tags) or any(tag == sub_name_l for tag in tags)
             if matched:
                 add_tmember(tid, sub_uid, sub_name, "waiting")
                 tagged_names.append(sub_name)
-                logger.info(f"[FINISH_GRP] ✅ MATCHED: {sub_name} (username={sub_uname})")
+                logger.info(f"[FINISH_GRP] MATCHED: {sub_name} (username={sub_uname})")
             else:
                 add_tmember(tid, sub_uid, sub_name, "skipped")
-                logger.info(f"[FINISH_GRP] ❌ SKIPPED: {sub_name} (username={sub_uname})")
-
+                logger.info(f"[FINISH_GRP] SKIPPED: {sub_name} (username={sub_uname})")
         sub_info = f"For: {', '.join(tagged_names)}" if tagged_names else "No matching subscribers"
     else:
-        # No tags — add all subscribers as waiting
         for sub_uid, sub_name, sub_uname in subs:
             add_tmember(tid, sub_uid, sub_name)
         sub_info = gsub_text(tid)
@@ -912,9 +987,8 @@ async def handle_nl_result(target, ctx, uid, ud, msg, ts, ds, utz, is_group=Fals
                 reply_markup=ForceReply(selective=True, input_field_placeholder="e.g. 9pm, 9:30 PM"),
                 parse_mode="HTML")
         else:
-            cancel = cancel_kb()
             sent = await target.reply_text(f"{hdr(title)}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
-                reply_markup=cancel, parse_mode="HTML")
+                reply_markup=cancel_kb(), parse_mode="HTML")
         save_p(ud, sent)
     else:
         ud["step"] = "g_date" if is_group else "date"
@@ -926,7 +1000,8 @@ async def handle_nl_result(target, ctx, uid, ud, msg, ts, ds, utz, is_group=Fals
         save_p(ud, sent)
 
 # ============= SHOW LIST =================
-async def show_list(target, uid, ud, new=False):
+async def show_list(target, uid, ctx, new=False):
+    ud = ctx.user_data
     try: rows = sheet.get_all_records()
     except Exception:
         try: client.login(); rows = sheet.get_all_records()
@@ -950,8 +1025,22 @@ async def show_list(target, uid, ud, new=False):
         if len(num_row) == 5: btns.append(num_row); num_row = []
     if num_row: btns.append(num_row)
     btns.append([InlineKeyboardButton("« Back", callback_data="home")])
-    if new: await target.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
-    else: await safe_edit(target, "\n".join(lines), InlineKeyboardMarkup(btns))
+    list_text = "\n".join(lines)
+
+    if new:
+        sent = await target.reply_text(list_text, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+        # Auto-minimize after 60s
+        count = len(items)
+        min_text = f"<b>📋 Reminders</b> ({count} active)"
+        show_cb = f"pshow_list_{sent.message_id}"
+        ctx.bot_data[f"plist_{sent.message_id}"] = {"uid": uid}
+        ctx.job_queue.run_once(p_auto_minimize, 60, data={
+            "c": sent.chat.id, "m": sent.message_id,
+            "min_text": min_text,
+            "min_kb": [[InlineKeyboardButton("📋 Show", callback_data=show_cb), InlineKeyboardButton("＋ New", callback_data="add")]]
+        })
+    else:
+        await safe_edit(target, list_text, InlineKeyboardMarkup(btns))
 
 # ============= BUTTON HANDLERS ===========
 async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -960,7 +1049,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data, ud, uid = q.data, ctx.user_data, q.from_user.id
     if data == "noop": return
 
-    # Update username on any button click in private
     if update.effective_chat.type == "private":
         update_username(uid, get_username(q.from_user))
 
@@ -969,7 +1057,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "gcancel":
         ud.clear(); await safe_edit(q.message, f"{hdr('Group Reminder')}\n\nCancelled."); return
 
-    # Group close → MINIMIZE (not delete)
+    # Group close → MINIMIZE
     if data == "gclose":
         mid = str(q.message.message_id)
         stored = ctx.bot_data.get(f"gmin_{mid}")
@@ -1003,11 +1091,29 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await safe_edit(q.message, GRP_START, gclose_kb())
         return
 
+    # Private show (expand from minimized)
+    if data.startswith("pshow_info_"):
+        mid = data[11:]
+        stored = ctx.bot_data.get(f"pinfo_{mid}")
+        if stored:
+            await safe_edit(q.message, stored["text"], home_kb())
+        else:
+            await info_cmd(update, ctx)
+        return
+    if data.startswith("pshow_list_"):
+        mid = data[11:]
+        stored = ctx.bot_data.get(f"plist_{mid}")
+        if stored:
+            await show_list(q.message, stored["uid"], ctx)
+        else:
+            await show_list(q.message, uid, ctx)
+        return
+
     if data == "add":
         await rm_home(ctx, ud); ud.clear(); ud["step"] = "message"
         sent = await q.message.reply_text(f"{hdr('New Reminder')}\nEnter message:", reply_markup=cancel_kb(), parse_mode="HTML")
         save_p(ud, sent); return
-    if data == "list_refresh": ud.clear(); await show_list(q.message, uid, ud); return
+    if data == "list_refresh": ud.clear(); await show_list(q.message, uid, ctx); return
 
     # Repeat change (private)
     if data.startswith("chrep_"):
@@ -1054,7 +1160,6 @@ async def _btn_group(q, ctx, uid, data):
         row, r = find_by_tid(tid)
         if not r or str(r[5]) != "active": await q.answer("Already fired.", show_alert=True); return
         if not add_tmember(tid, uid_s, user.first_name or "User"): await q.answer("Already joined!", show_alert=True); return
-        # Auto-subscribe to group + store username
         set_gsub(str(q.message.chat.id), uid_s, user.first_name or "User", uname, True)
         msg, ds, ts, rs = get_detail(r)
         rep = r[4] if len(r) > 4 else "none"
@@ -1064,7 +1169,6 @@ async def _btn_group(q, ctx, uid, data):
         tid = data[6:]
         row, r = find_by_tid(tid)
         if not r or str(r[5]) != "active": await q.answer("Already fired.", show_alert=True); return
-        # Store username on skip too
         set_gsub(str(q.message.chat.id), uid_s, user.first_name or "User", uname, True)
         ms = get_tmembers(tid)
         if any(str(u) == uid_s for u, _, _ in ms): set_tstatus(tid, uid_s, "skipped")
@@ -1339,12 +1443,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     step = ctx.user_data.get("step", "")
     text = update.message.text.strip()
 
-    # Update username on any text in private
     if update.effective_chat.type == "private":
         update_username(update.effective_user.id, get_username(update.effective_user))
 
     if update.effective_chat.type != "private":
-        # In groups: handle g_ steps if in correct group
         if step.startswith("g_") and str(update.effective_chat.id) == str(ctx.user_data.get("g_chat", "")):
             await _do_step(update, ctx, step, text)
         return
@@ -1359,7 +1461,6 @@ async def _try_nl(update, ctx, text):
 
     msg, ts, ds, rep = result['message'], result.get('time'), result.get('date'), result.get('repeat')
 
-    # Need at least time, date, or a recognized prefix to trigger
     has_prefix = bool(re.search(r'(?:remind|reminder|remember|don.?t\s+forget|set\s+reminder)', text, re.I))
     if not ts and not ds and not has_prefix: return
 
@@ -1374,7 +1475,6 @@ async def _do_step(update, ctx, step, text):
     ud, uid = ctx.user_data, update.effective_user.id
     utz = get_tz(uid)
 
-    # === PRIVATE MESSAGE STEP (with NL) ===
     if step == "message":
         await del_prompt(ctx, ud)
         result = parse_nl_partial(text, tz=utz)
@@ -1392,7 +1492,6 @@ async def _do_step(update, ctx, step, text):
                 reply_markup=cal_kb(now.year, now.month, tz=utz), parse_mode="HTML")
             save_p(ud, sent)
 
-    # === PRIVATE TIME STEP ===
     elif step == "time":
         parsed = parse_time(text)
         if not parsed: await update.message.reply_text("Invalid time.\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", parse_mode="HTML"); return
@@ -1401,7 +1500,6 @@ async def _do_step(update, ctx, step, text):
         await del_prompt(ctx, ud); ud["time"] = parsed
         await save_reminder(update.message, uid, ud, ud.get("message", ""), ds, parsed)
 
-    # === EDIT STEPS ===
     elif step == "edit_message":
         row = ud.get("editing_row")
         if not row: return
@@ -1428,7 +1526,6 @@ async def _do_step(update, ctx, step, text):
         await update.message.reply_text(f"{hdr('Settings')}\nDigest time → <b>{fmt_time(parsed)}</b>",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Settings", callback_data="cfg_back")]]), parse_mode="HTML")
 
-    # === GROUP MESSAGE STEP (with NL) ===
     elif step == "g_message":
         await del_prompt(ctx, ud)
         result = parse_nl_partial(text, tz=utz)
@@ -1446,7 +1543,6 @@ async def _do_step(update, ctx, step, text):
                 reply_markup=cal_kb(now.year, now.month, "gcancel", "✕ Cancel", tz=utz), parse_mode="HTML")
             save_p(ud, sent)
 
-    # === GROUP TIME STEP ===
     elif step == "g_time":
         parsed = parse_time(text)
         if not parsed: await update.message.reply_text("Invalid time.\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", parse_mode="HTML"); return
