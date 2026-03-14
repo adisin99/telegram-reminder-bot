@@ -132,7 +132,6 @@ def fmt_rep(r):
     if s.startswith("custom:"):
         days = s.split(":")[1].split(",") if ":" in s else []
         if not days: return "Custom"
-        # Check if consecutive for short display
         if days == ["mon","tue","wed","thu","fri"]: return "Mon–Fri"
         if days == ["sat","sun"]: return "Weekends"
         if days == DAY_KEYS: return "Every day"
@@ -225,7 +224,11 @@ def update_username(uid, username):
     for i, r in enumerate(rows[1:], 2):
         if str(r[0]) == uid_s:
             current = r[6].strip().lower() if len(r) > 6 else ""
-            if current != uname: cfg_sheet.update_cell(i, 7, uname)
+            if current != uname:
+                if len(r) < 7:
+                    cfg_sheet.update_cell(i, 7, uname)
+                else:
+                    cfg_sheet.update_cell(i, 7, uname)
             return
     get_cfg(uid)
     try: rows = cfg_sheet.get_all_values()
@@ -253,7 +256,6 @@ def is_past(ds, ts, tz=None):
 def past_msg(ts): return f"⚠ {fmt_time(ts)} has already passed today."
 
 def is_custom_day_match(rep, now):
-    """Check if today matches a custom:mon,tue,... repeat schedule."""
     if not str(rep).startswith("custom:"): return True
     days = str(rep).split(":")[1].split(",") if ":" in str(rep) else []
     today_abbr = now.strftime("%a").lower()[:3]
@@ -274,7 +276,6 @@ def advance_rep(row, r):
     elif rep.startswith("custom:"):
         days = rep.split(":")[1].split(",") if ":" in rep else []
         if not days: return False
-        # Find next matching day
         for offset in range(1, 8):
             candidate = d + timedelta(days=offset)
             if candidate.strftime("%a").lower()[:3] in days:
@@ -493,7 +494,6 @@ def rep_picker_kb(prefix):
          InlineKeyboardButton("Customize", callback_data=f"{prefix}_custom")]])
 
 def custom_days_kb(selected, prefix):
-    """Build Mon-Sun toggle keyboard. Selected days show [brackets]."""
     row1, row2 = [], []
     for i, (name, key) in enumerate(zip(DAY_NAMES, DAY_KEYS)):
         lbl = f"[{name}]" if key in selected else name
@@ -501,7 +501,6 @@ def custom_days_kb(selected, prefix):
         if i < 4: row1.append(btn)
         else: row2.append(btn)
     btns = [row1, row2]
-    # Quick select buttons
     btns.append([
         InlineKeyboardButton("Mon–Fri", callback_data=f"cday_{prefix}_weekdays"),
         InlineKeyboardButton("All", callback_data=f"cday_{prefix}_all"),
@@ -562,7 +561,7 @@ def cal_kb(year, month, back_cb="cancel", back_txt="✕ Cancel", tz=None):
 # ============= PARSERS ====================
 def parse_time(text):
     s = text.strip()
-    for pat, mode in [(r'^(\d{1,2})[:.]?\s*(\d{1,2})\s*(am|pm)$', 'hma'), (r'^(\d{1,2})\s*(am|pm)$', 'ha'), (r'^(\d{1,2})[:.]\s*(\d{1,2})$', '24')]:
+    for pat, mode in [(r'^(\d{1,2})[:.]\s*(\d{1,2})\s*(am|pm)$', 'hma'), (r'^(\d{1,2})\s*(am|pm)$', 'ha'), (r'^(\d{1,2})[:.]\s*(\d{1,2})$', '24')]:
         m = re.match(pat, s, re.I)
         if not m: continue
         if mode == 'hma': h, mi, ap = int(m.group(1)), int(m.group(2)), m.group(3).lower()
@@ -725,6 +724,7 @@ async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("add", "New reminder"),
         BotCommand("list", "All reminders"),
+        BotCommand("month", "Monthly schedule"),
         BotCommand("settings", "Bot settings"),
         BotCommand("info", "About this bot"),
     ], scope=BotCommandScopeAllPrivateChats())
@@ -834,13 +834,14 @@ async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• Flexible time input\n"
         "• Relative time (in 5 min, in 2 hours)\n"
         "• Snooze (15m to 12h)\n• Auto-retry if missed\n• Edit or cancel anytime\n• Daily morning digest\n"
+        "• Monthly schedule (/month)\n"
         f"• Per-user timezone ({tz_short(cfg['timezone'])})\n\n"
         "<b>Group Reminders</b>\n• Use /remind in groups\n"
         "• Tag members to assign specific people\n• Members opt in per reminder\n"
         "• Track who's done / pending / missed\n\n"
-        "<b>Commands</b>\n/add — New reminder\n/list — All reminders\n/remind — Group reminder\n"
+        "<b>Commands</b>\n/add — New reminder\n/list — All reminders\n/month — Monthly schedule\n/remind — Group reminder\n"
         "/settings — Bot settings\n/info — This page")
-    show_cb = f"pshow_info"
+    show_cb = "pshow_info"
     sent = await update.message.reply_text(info_text, reply_markup=close_show_kb(show_cb), parse_mode="HTML")
     ctx.bot_data[f"pinfo_{sent.message_id}"] = {"text": info_text, "uid": update.effective_user.id}
     ctx.bot_data["pinfo_latest"] = sent.message_id
@@ -927,6 +928,213 @@ async def show_settings(target, uid, new=False):
     btns.append([InlineKeyboardButton("« Back", callback_data="home")])
     if new: await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
     else: await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+
+# ============= MONTH VIEW =================
+async def month_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("Use /month in private chat."); return
+    await rm_home(ctx, ctx.user_data); ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
+    uid = update.effective_user.id
+    utz = get_tz(uid)
+    now = datetime.now(utz)
+    txt, kb = build_month_view(uid, now.year, now.month, utz)
+    sent = await update.message.reply_text(txt, reply_markup=kb, parse_mode="HTML")
+    save_home(ctx.user_data, sent)
+
+def get_user_reminders(uid):
+    try: rows = sheet.get_all_values()
+    except Exception: return []
+    uid_s = str(uid)
+    return [r for r in rows[1:] if len(r) >= 6 and str(r[0]) == uid_s and not (len(r) > 7 and str(r[7]).strip())]
+
+def expand_recur(reminders, start_date, end_date):
+    """Expand recurring reminders into individual date occurrences within a range."""
+    expanded = []
+    for r in reminders:
+        msg = str(r[1]).strip()
+        ds = norm_date(r[2])
+        ts = norm_time(r[3])
+        rep = str(r[4]).strip() if len(r) > 4 else "none"
+        st = str(r[5]).strip() if len(r) > 5 else "active"
+
+        try: rem_date = datetime.strptime(ds, "%Y-%m-%d").date()
+        except Exception: continue
+
+        if rep == "none" or not rep:
+            if start_date <= rem_date <= end_date:
+                expanded.append({"date": rem_date, "msg": msg, "time": ts, "rep": rep, "status": st})
+        elif rep == "daily":
+            d = max(rem_date, start_date)
+            while d <= end_date:
+                expanded.append({"date": d, "msg": msg, "time": ts, "rep": rep, "status": st if d == rem_date else "active"})
+                d += timedelta(days=1)
+        elif rep == "weekly":
+            d = rem_date
+            while d <= end_date:
+                if d >= start_date:
+                    expanded.append({"date": d, "msg": msg, "time": ts, "rep": rep, "status": st if d == rem_date else "active"})
+                d += timedelta(days=7)
+        elif rep == "monthly":
+            d = rem_date
+            for _ in range(12):
+                if start_date <= d <= end_date:
+                    expanded.append({"date": d, "msg": msg, "time": ts, "rep": rep, "status": st if d == rem_date else "active"})
+                mo, yr = d.month + 1, d.year
+                if mo > 12: mo, yr = 1, yr + 1
+                try: d = d.replace(year=yr, month=mo)
+                except ValueError: break
+        elif rep.startswith("custom:"):
+            cdays = rep.split(":")[1].split(",") if ":" in rep else []
+            if not cdays: continue
+            d = max(rem_date, start_date)
+            while d <= end_date:
+                if d.strftime("%a").lower()[:3] in cdays:
+                    expanded.append({"date": d, "msg": msg, "time": ts, "rep": rep, "status": st if d == rem_date else "active"})
+                d += timedelta(days=1)
+    return expanded
+
+def group_recur(items):
+    """Group recurring items that repeat on consecutive/pattern days."""
+    grouped, singles = {}, []
+    for item in items:
+        key = f"{item['msg']}_{item['time']}_{item['rep']}"
+        if item["rep"] and item["rep"] != "none":
+            grouped.setdefault(key, {"msg": item["msg"], "time": item["time"], "rep": item["rep"], "dates": []})
+            grouped[key]["dates"].append(item["date"])
+        else:
+            singles.append(item)
+    return singles, list(grouped.values())
+
+def build_month_view(uid, year, month, utz):
+    now = datetime.now(utz)
+    first_day = datetime(year, month, 1).date()
+    last_day = datetime(year, month, cal_module.monthrange(year, month)[1]).date()
+
+    reminders = get_user_reminders(uid)
+    expanded = expand_recur(reminders, first_day, last_day)
+
+    # Group by week
+    weeks = []
+    d = first_day
+    while d <= last_day:
+        week_start = d
+        week_end = min(d + timedelta(days=6 - d.weekday()), last_day)
+        week_items = [x for x in expanded if week_start <= x["date"] <= week_end]
+        weeks.append({"start": week_start, "end": week_end, "count": len(week_items)})
+        d = week_end + timedelta(days=1)
+
+    # Stats
+    total = len(expanded)
+    done_count = sum(1 for x in expanded if x["status"] == "done")
+    missed_count = sum(1 for x in expanded if x["status"] == "missed")
+    upcoming = total - done_count - missed_count
+
+    lines = [f"📅 <b>{cal_module.month_name[month]} {year}</b>\n{DIV}\n"]
+    for i, w in enumerate(weeks):
+        ws = w["start"].strftime("%-d %b")
+        we = w["end"].strftime("%-d %b")
+        current = " ◂" if w["start"] <= now.date() <= w["end"] else ""
+        lines.append(f"<b>W{i+1}</b>: {ws}–{we}{current} · {w['count']} reminder{'s' if w['count'] != 1 else ''}")
+
+    if total:
+        lines.append(f"\nTotal: {total}")
+        parts = []
+        if done_count: parts.append(f"✅ {done_count} done")
+        if missed_count: parts.append(f"✗ {missed_count} missed")
+        if upcoming: parts.append(f"○ {upcoming} upcoming")
+        if parts: lines.append(" · ".join(parts))
+
+    btns = []
+    num_row = []
+    for i in range(len(weeks)):
+        num_row.append(InlineKeyboardButton(str(i+1), callback_data=f"mw_{year}_{month:02d}_{i}"))
+        if len(num_row) == 5: btns.append(num_row); num_row = []
+    if num_row: btns.append(num_row)
+
+    # Month navigation
+    pm, py = ((month - 2) % 12) + 1, year - (1 if month == 1 else 0)
+    nm, ny = (month % 12) + 1, year + (1 if month == 12 else 0)
+    nav = [InlineKeyboardButton("‹", callback_data=f"mn_{py}_{pm:02d}"),
+           InlineKeyboardButton("›", callback_data=f"mn_{ny}_{nm:02d}")]
+    btns.append(nav)
+    btns.append([InlineKeyboardButton("« Back", callback_data="home")])
+
+    return "\n".join(lines), InlineKeyboardMarkup(btns)
+
+def build_week_view(uid, year, month, week_idx, utz):
+    now = datetime.now(utz)
+    first_day = datetime(year, month, 1).date()
+    last_day = datetime(year, month, cal_module.monthrange(year, month)[1]).date()
+
+    # Find the week
+    d = first_day
+    weeks = []
+    while d <= last_day:
+        week_start = d
+        week_end = min(d + timedelta(days=6 - d.weekday()), last_day)
+        weeks.append((week_start, week_end))
+        d = week_end + timedelta(days=1)
+
+    if week_idx >= len(weeks):
+        return f"{hdr('Week')}\nInvalid week.", InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"mn_{year}_{month:02d}")]])
+
+    ws, we = weeks[week_idx]
+    reminders = get_user_reminders(uid)
+    expanded = expand_recur(reminders, ws, we)
+
+    # Group by date
+    by_date = {}
+    for item in expanded:
+        by_date.setdefault(item["date"], []).append(item)
+
+    # Separate recurring for grouping
+    singles, recur_groups = group_recur(expanded)
+
+    lines = [f"<b>Week {week_idx+1}</b>: {ws.strftime('%-d %b')}–{we.strftime('%-d %b')}\n{DIV}\n"]
+
+    # Show day-by-day (singles + unique daily items)
+    shown_recur_keys = set()
+    d = ws
+    while d <= we:
+        day_items = by_date.get(d, [])
+        day_singles = [x for x in day_items if x["rep"] == "none" or not x["rep"]]
+        if day_singles:
+            day_label = f"Today, {d.strftime('%-d %b')}" if d == now.date() else f"{d.strftime('%a')}, {d.strftime('%-d %b')}"
+            lines.append(f"<b>{day_label}</b>")
+            for item in sorted(day_singles, key=lambda x: x["time"]):
+                ic = ST_IC.get(item["status"], "○")
+                lines.append(f"  {ic} {item['msg']} · {fmt_time(item['time'])}")
+            lines.append("")
+        d += timedelta(days=1)
+
+    # Show recurring groups at bottom
+    if recur_groups:
+        for grp in recur_groups:
+            dates = sorted(grp["dates"])
+            if len(dates) >= 5 and grp["rep"] == "daily":
+                # Check if Mon-Fri
+                weekdays = [d for d in dates if d.weekday() < 5]
+                weekends = [d for d in dates if d.weekday() >= 5]
+                if weekdays and not weekends:
+                    label = "Mon–Fri"
+                elif weekends and not weekdays:
+                    label = "Weekends"
+                else:
+                    label = "Daily"
+            elif grp["rep"].startswith("custom:"):
+                label = fmt_rep(grp["rep"])
+            elif grp["rep"] == "weekly":
+                label = dates[0].strftime("%A") + "s" if dates else "Weekly"
+            else:
+                label = fmt_rep(grp["rep"])
+            lines.append(f"<i>{label}</i>\n  ○ {grp['msg']} · {fmt_time(grp['time'])}")
+
+    if not expanded:
+        lines.append("No reminders this week.")
+
+    btns = [[InlineKeyboardButton(f"« {cal_module.month_name[month]} {year}", callback_data=f"mn_{year}_{month:02d}")]]
+    return "\n".join(lines), InlineKeyboardMarkup(btns)
 
 # ============= SAVE FUNCTIONS =============
 async def save_reminder(target, uid, ud, msg, date, time, edit_msg=False):
@@ -1050,22 +1258,12 @@ async def show_list(target, uid, ctx, new=False):
         num_row.append(InlineKeyboardButton(str(idx), callback_data=f"view_{ri}"))
         if len(num_row) == 5: btns.append(num_row); num_row = []
     if num_row: btns.append(num_row)
-    list_text = "\n".join(lines)
-    count = len(items)
-    show_cb = "pshow_list"
-
+    btns.append([InlineKeyboardButton("« Back", callback_data="home")])
     if new:
-        btns.append([InlineKeyboardButton("✕ Close", callback_data=f"pclose_{show_cb}"), InlineKeyboardButton("＋ New", callback_data="add")])
-        sent = await target.reply_text(list_text, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
-        ctx.bot_data[f"plist_{sent.message_id}"] = {"uid": uid}
-        ctx.bot_data["plist_latest"] = sent.message_id
-        ctx.job_queue.run_once(auto_minimize, 60, data={
-            "c": sent.chat.id, "m": sent.message_id,
-            "min_text": f"<b>📋 Reminders</b> ({count} active)", "show_cb": show_cb
-        })
+        sent = await target.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+        save_home(ud, sent)
     else:
-        btns.append([InlineKeyboardButton("✕ Close", callback_data=f"pclose_{show_cb}"), InlineKeyboardButton("＋ New", callback_data="add")])
-        await safe_edit(target, list_text, InlineKeyboardMarkup(btns))
+        await safe_edit(target, "\n".join(lines), InlineKeyboardMarkup(btns))
 
 # ============= BUTTON HANDLERS ===========
 async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1098,12 +1296,9 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if show_cb == "pshow_list":
             count = "?"
             try:
-                mid = str(q.message.message_id)
-                stored = ctx.bot_data.get(f"plist_{mid}")
-                if stored:
-                    uid_s = str(stored.get("uid", uid))
-                    rows = sheet.get_all_records()
-                    count = sum(1 for r in rows if str(r.get("user_id", "")) == uid_s and str(r.get("status", "")).strip() in ("active", "pending", "missed", "snoozed") and not str(r.get("group_id", "")).strip())
+                uid_s = str(uid)
+                rows = sheet.get_all_records()
+                count = sum(1 for r in rows if str(r.get("user_id", "")) == uid_s and str(r.get("status", "")).strip() in ("active", "pending", "missed", "snoozed") and not str(r.get("group_id", "")).strip())
             except Exception: pass
             await safe_edit(q.message, f"<b>📋 Reminders</b> ({count} active)", show_only_kb(show_cb))
         elif show_cb == "pshow_info":
@@ -1114,19 +1309,16 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Private show (expand from minimized)
     if data == "pshow_info":
-        await info_cmd(update, ctx)
-        return
+        await info_cmd(update, ctx); return
     if data == "pshow_list":
-        await show_list(q.message, uid, ctx)
-        return
+        await show_list(q.message, uid, ctx); return
 
     # Group show (expand from minimized)
     if data.startswith("gshow_start_"):
         mid = data[12:]
         stored = ctx.bot_data.get(f"gmin_{mid}")
         full = stored.get("full_text", GRP_START) if stored else GRP_START
-        await safe_edit(q.message, full, gclose_kb())
-        return
+        await safe_edit(q.message, full, gclose_kb()); return
     if data.startswith("gshow_list_"):
         parts = data[11:]
         sep = parts.rfind("_")
@@ -1139,8 +1331,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await safe_edit(q.message, f"{hdr('Group Reminders')}\nNo active reminders.", gclose_kb())
         return
     if data.startswith("gshow_generic_"):
-        await safe_edit(q.message, GRP_START, gclose_kb())
-        return
+        await safe_edit(q.message, GRP_START, gclose_kb()); return
 
     if data == "add":
         await rm_home(ctx, ud); ud.clear(); ud["step"] = "message"
@@ -1193,7 +1384,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Custom days toggle
     if data.startswith("cday_"):
         rest = data[5:]
-        # Find the day key (last part)
         last_us = rest.rfind("_")
         if last_us < 0: return
         prefix, day_key = rest[:last_us], rest[last_us+1:]
@@ -1207,10 +1397,8 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif day_key in DAY_KEYS:
             if day_key in selected: selected.remove(day_key)
             else: selected.append(day_key)
-            # Keep sorted by day order
             selected = [d for d in DAY_KEYS if d in selected]
         ud["custom_days_selected"] = selected
-        # Re-render
         info = ud.get("custom_days_for")
         if info:
             kind, key = info
@@ -1226,7 +1414,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Custom days save
     if data.startswith("cdaysave_"):
-        rest = data[9:]
         selected = ud.get("custom_days_selected", [])
         if not selected: return
         rep_value = f"custom:{','.join(selected)}"
@@ -1253,7 +1440,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Custom days back
     if data.startswith("cdayback_"):
-        rest = data[9:]
         info = ud.get("custom_days_for")
         ud.pop("custom_days_for", None)
         ud.pop("custom_days_selected", None)
@@ -1269,6 +1455,20 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     msg, ds, ts, _ = get_detail(r)
                     await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nRepeat?", rep_picker_kb(f"gchrepv_{key}"))
         return
+
+    # Month view callbacks
+    if data.startswith("mw_"):
+        parts = data[3:].split("_")
+        yr, mo, wi = int(parts[0]), int(parts[1]), int(parts[2])
+        utz = get_tz(uid)
+        txt, kb = build_week_view(uid, yr, mo, wi, utz)
+        await safe_edit(q.message, txt, kb); return
+    if data.startswith("mn_"):
+        parts = data[3:].split("_")
+        yr, mo = int(parts[0]), int(parts[1])
+        utz = get_tz(uid)
+        txt, kb = build_month_view(uid, yr, mo, utz)
+        await safe_edit(q.message, txt, kb); return
 
     # Group callbacks
     if data.startswith(("gjoin_", "gskip_", "gdone_", "gsnzp_", "gsnzb_", "gsnz_")):
@@ -1810,6 +2010,59 @@ async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
         try: await ctx.bot.send_message(chat_id=uid_int, text="\n".join(lines), reply_markup=home_kb(), parse_mode="HTML")
         except Exception as e: logger.error(f"[DIGEST] {r[0]}: {e}")
 
+# ============= WEEKLY REPORT =============
+async def check_weekly_report(ctx: ContextTypes.DEFAULT_TYPE):
+    try: cfg_rows = cfg_sheet.get_all_values()
+    except Exception:
+        try: client.login(); cfg_rows = cfg_sheet.get_all_values()
+        except Exception: return
+    for r in cfg_rows[1:]:
+        tz_name = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        user_tz = safe_tz(tz_name); now = datetime.now(user_tz)
+        if now.weekday() != 6: continue
+        if now.strftime("%H:%M") != "09:00": continue
+        try: uid_int = int(r[0])
+        except (ValueError, TypeError): continue
+        try: rem_rows = sheet.get_all_values()
+        except Exception: continue
+        week_start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        week_end = now.strftime("%Y-%m-%d")
+        uid_s = str(r[0])
+        done, missed, snoozed = 0, 0, 0
+        day_done, day_missed = {}, {}
+        for v in rem_rows[1:]:
+            if len(v) < 6 or str(v[0]) != uid_s: continue
+            if len(v) > 7 and str(v[7]).strip(): continue
+            ds = norm_date(str(v[2]).strip())
+            st = str(v[5]).strip().lower()
+            if week_start <= ds <= week_end:
+                if st == "done": done += 1
+                elif st == "missed": missed += 1
+                try:
+                    wd = datetime.strptime(ds, "%Y-%m-%d").strftime("%A")
+                    if st == "done": day_done[wd] = day_done.get(wd, 0) + 1
+                    elif st == "missed": day_missed[wd] = day_missed.get(wd, 0) + 1
+                except Exception: pass
+        total = done + missed
+        if total == 0: continue
+        pct = round(done / total * 100)
+        best_day = max(day_done, key=day_done.get) if day_done else "—"
+        worst_day = max(day_missed, key=day_missed.get) if day_missed else "—"
+        if pct >= 90: mot = "Outstanding! 🏆"
+        elif pct >= 70: mot = "Keep it up! 💪"
+        elif pct >= 50: mot = "Room to improve 📈"
+        else: mot = "Let's do better next week 🎯"
+        ws_d = (now - timedelta(days=7)).strftime("%-d %b")
+        we_d = now.strftime("%-d %b")
+        txt = (f"📊 <b>Weekly Report</b>\n{DIV}\n{ws_d} — {we_d}\n\n"
+               f"✅ Completed: {done}/{total} ({pct}%)\n"
+               f"❌ Missed: {missed}\n\n"
+               f"📅 Most Productive: {best_day}\n"
+               f"📉 Most Missed: {worst_day}\n\n"
+               f"{mot}")
+        try: await ctx.bot.send_message(chat_id=uid_int, text=txt, reply_markup=home_kb(), parse_mode="HTML")
+        except Exception as e: logger.error(f"[WEEKLY] {uid_s}: {e}")
+
 # ============= SCHEDULER =================
 async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
     try: cfg_vals = cfg_sheet.get_all_values()
@@ -1832,7 +2085,6 @@ async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
         user_tz = safe_tz(tz_map.get(uid_s, DEF_TZ)); now = datetime.now(user_tz)
         if norm_date(str(v[2]).strip()) != now.strftime("%Y-%m-%d"): continue
         if norm_time(str(v[3]).strip()) != now.strftime("%H:%M"): continue
-        # Check custom day match
         rep = str(v[4]).strip() if len(v) > 4 else "none"
         if not is_custom_day_match(rep, now): continue
         uid = int(v[0]) if v[0].isdigit() else v[0]
@@ -1852,12 +2104,13 @@ async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
 # ============= MAIN ======================
 def main():
     app = Application.builder().token(TOKEN).job_queue(JobQueue()).post_init(post_init).build()
-    for cmd, fn in [("start", start), ("add", add_cmd), ("list", list_cmd), ("remind", remind_cmd), ("settings", settings_cmd), ("info", info_cmd)]:
+    for cmd, fn in [("start", start), ("add", add_cmd), ("list", list_cmd), ("month", month_cmd), ("remind", remind_cmd), ("settings", settings_cmd), ("info", info_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(on_btn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.job_queue.run_repeating(check_reminders, interval=60, first=0)
     app.job_queue.run_repeating(check_digest, interval=60, first=10)
+    app.job_queue.run_repeating(check_weekly_report, interval=60, first=20)
     print("Smart Reminder Bot Running")
     app.run_polling()
 
