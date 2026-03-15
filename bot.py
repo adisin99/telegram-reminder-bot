@@ -1,4 +1,4 @@
-import logging, os, json, re, math, calendar as cal_mod
+import logging, os, json, re, time as _time
 from datetime import datetime, timedelta
 import pytz
 from telegram import Update, InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM, ForceReply, BotCommand
@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# ============= CONFIG =============
+# ========== CONFIG ==========
 TOKEN = "8235103406:AAFYJ2SNRW4A4AAEyz8t2h-5BeYk8rnzzwE"
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs/edit?pli=1&gid=0#gid=0"
 
@@ -14,2588 +14,1944 @@ DEF_TZ = "Asia/Kolkata"
 DEF_RETRIES = 3
 DEF_RETRY_GAP = 10
 DEF_DIGEST_TIME = "07:00"
-
-# ============= LOGGING =============
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
-log = logging.getLogger(__name__)
-
-# ============= TIMEZONE DATA =============
+DAYS = ["mon","tue","wed","thu","fri","sat","sun"]
+DAY_NAMES = {"mon":"Monday","tue":"Tuesday","wed":"Wednesday","thu":"Thursday","fri":"Friday","sat":"Saturday","sun":"Sunday"}
+DAY_SHORT = {"monday":"mon","tuesday":"tue","wednesday":"wed","thursday":"thu","friday":"fri","saturday":"sat","sunday":"sun",
+             "mon":"mon","tue":"tue","wed":"wed","thu":"thu","fri":"fri","sat":"sat","sun":"sun"}
+ST_IC = {"active":"○","pending":"●","snoozed":"◐","done":"✅","missed":"✗","cancelled":"—"}
+ST_LB = {"active":"Active","pending":"Pending","snoozed":"Snoozed","done":"Done","missed":"Missed","cancelled":"Cancelled"}
+GT_IC = {"waiting":"⏳","pending":"⏳","done":"✅","snoozed":"⏳","missed":"✗","skipped":"⏭"}
+SNOOZE_OPTIONS = [("15m",15),("30m",30),("45m",45),("1h",60),("2h",120),("3h",180),("5h",300),("8h",480),("12h",720)]
 TZ_DATA = {
-    "Asia": [("India", "Asia/Kolkata"), ("UAE", "Asia/Dubai"), ("Pakistan", "Asia/Karachi"),
-             ("Bangladesh", "Asia/Dhaka"), ("Thailand", "Asia/Bangkok"), ("Singapore", "Asia/Singapore"),
-             ("China", "Asia/Shanghai"), ("Japan", "Asia/Tokyo"), ("Korea", "Asia/Seoul"),
-             ("Indonesia", "Asia/Jakarta"), ("Saudi Arabia", "Asia/Riyadh"), ("Philippines", "Asia/Manila")],
-    "Europe": [("UK", "Europe/London"), ("Germany", "Europe/Berlin"), ("France", "Europe/Paris"),
-               ("Russia", "Europe/Moscow"), ("Turkey", "Europe/Istanbul")],
-    "Americas": [("US East", "America/New_York"), ("US Central", "America/Chicago"),
-                 ("US Mountain", "America/Denver"), ("US West", "America/Los_Angeles"),
-                 ("Brazil", "America/Sao_Paulo"), ("Mexico", "America/Mexico_City")],
-    "Africa": [("Nigeria", "Africa/Lagos"), ("Egypt", "Africa/Cairo"),
-               ("Kenya", "Africa/Nairobi"), ("South Africa", "Africa/Johannesburg")],
-    "Oceania": [("Australia", "Australia/Sydney"), ("New Zealand", "Pacific/Auckland")]
+    "Asia":[("India","Asia/Kolkata"),("UAE","Asia/Dubai"),("Pakistan","Asia/Karachi"),("Bangladesh","Asia/Dhaka"),
+            ("Thailand","Asia/Bangkok"),("Singapore","Asia/Singapore"),("China","Asia/Shanghai"),("Japan","Asia/Tokyo"),
+            ("Korea","Asia/Seoul"),("Indonesia","Asia/Jakarta"),("Saudi Arabia","Asia/Riyadh"),("Philippines","Asia/Manila")],
+    "Europe":[("UK","Europe/London"),("Germany","Europe/Berlin"),("France","Europe/Paris"),("Russia","Europe/Moscow"),("Turkey","Europe/Istanbul")],
+    "Americas":[("US East","America/New_York"),("US Central","America/Chicago"),("US Mountain","America/Denver"),
+                ("US West","America/Los_Angeles"),("Brazil","America/Sao_Paulo"),("Mexico","America/Mexico_City")],
+    "Africa":[("Nigeria","Africa/Lagos"),("Egypt","Africa/Cairo"),("Kenya","Africa/Nairobi"),("South Africa","Africa/Johannesburg")],
+    "Oceania":[("Australia","Australia/Sydney"),("New Zealand","Pacific/Auckland")]
 }
-TZ_REGIONS = list(TZ_DATA.keys())
-TZ_ICONS = {"Asia": "\U0001f30f", "Europe": "\U0001f30d", "Americas": "\U0001f30e",
-            "Africa": "\U0001f30d", "Oceania": "\U0001f30f"}
-DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-DAY_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-DAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-ST_IC = {"active": "\u25cb", "pending": "\u25cf", "snoozed": "\u25cf", "done": "\u2705", "missed": "\u2717", "cancelled": "\u2718"}
-ST_LB = {"active": "Active", "pending": "Pending", "snoozed": "Snoozed", "done": "Done", "missed": "Missed", "cancelled": "Cancelled"}
-GT_IC = {"waiting": "\u23f3", "pending": "\u23f3", "done": "\u2705", "missed": "\u2717", "snoozed": "\u23f3", "skipped": "\u23ed"}
-SNOOZE_OPTIONS = [(15, "15m"), (30, "30m"), (45, "45m"), (60, "1h"), (120, "2h"), (180, "3h"), (300, "5h"), (480, "8h"), (720, "12h")]
-FILLER = re.compile(r"^(remind me to|remind me|reminder|remember to|don't forget to|dont forget to|set reminder)\s+", re.I)
-REP_MAP = {"none": "Once", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}
+TZ_ICONS = {"Asia":"🌏","Europe":"🌍","Americas":"🌎","Africa":"🌍","Oceania":"🌏"}
+USERNAME_CACHE = {}
+UID_USERNAME = {}
 
-# ============= GOOGLE SHEETS =============
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+
+# ========== GOOGLE SHEETS ==========
+scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
 creds_json = os.environ.get("GOOGLE_CREDS")
-if not creds_json:
-    raise Exception("GOOGLE_CREDS missing")
+if not creds_json: raise Exception("GOOGLE_CREDS missing")
 credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(creds_json), scope)
-client = gspread.authorize(credentials)
-workbook = client.open_by_url(SHEET_URL)
+gclient = gspread.authorize(credentials)
+workbook = gclient.open_by_url(SHEET_URL)
 
 def get_or_create_sheet(name, headers):
     try:
         ws = workbook.worksheet(name)
-    except gspread.WorksheetNotFound:
-        ws = workbook.add_worksheet(name, rows=1000, cols=len(headers))
+    except gspread.exceptions.WorksheetNotFound:
+        ws = workbook.add_worksheet(title=name, rows=1000, cols=len(headers))
         ws.append_row(headers, value_input_option="RAW")
     return ws
 
 sheet = get_or_create_sheet("Reminders", ["user_id","message","date","time","repeat","status","retry_count","group_id","task_id"])
 cfg_sheet = get_or_create_sheet("Settings", ["user_id","digest_on","digest_time","max_retries","retry_gap","timezone","username","weekly_report"])
-grp_sheet = get_or_create_sheet("GroupMembers", ["group_id","user_id","first_name","username","subscribed"])
+gm_sheet = get_or_create_sheet("GroupMembers", ["group_id","user_id","first_name","username","subscribed"])
 tm_sheet = get_or_create_sheet("TaskMembers", ["task_id","user_id","first_name","status"])
 
-# ============= HELPERS =============
-def hdr(t):
-    return f"<b>{t}</b>\n{'━'*20}"
-
+# ========== HELPERS ==========
+def hdr(t): return f"<b>{t}</b>\n━━━━━━━━━━━━━━━━━━━━"
 def detail(m, d, t, r=None):
-    ds = fmt_date(d) if d else ""
-    ts = fmt_time(t) if t else ""
-    parts = [p for p in [ds, ts, rep_label(r)] if p]
-    return f"{m}\n{' \u00b7 '.join(parts)}" if parts else m
-
-def rep_label(r):
-    if not r:
-        return ""
-    if r.startswith("custom:"):
-        days = r.replace("custom:", "").split(",")
-        if set(days) == {"mon","tue","wed","thu","fri"}:
-            return "Mon\u2013Fri"
-        if set(days) == {"sat","sun"}:
-            return "Weekends"
-        if len(days) == 7:
-            return "Daily"
-        return ", ".join(d.capitalize() for d in days)
-    return REP_MAP.get(r, r.capitalize())
-
+    ds = fmt_date(d); ts = fmt_time(t)
+    line = f"{m}\n{ds} · {ts}"
+    if r and r != "none":
+        if r.startswith("custom:"): line += f" · {fmt_custom(r)}"
+        else: line += f" · {r.title()}"
+    return line
 def fmt_date(d):
-    if not d:
-        return ""
-    try:
-        dt = datetime.strptime(str(d).strip(), "%Y-%m-%d")
-        return dt.strftime("%-d %b")
-    except:
-        return str(d)
-
+    try: return datetime.strptime(str(d),"%Y-%m-%d").strftime("%-d %b")
+    except: return str(d)
 def fmt_time(t):
-    if not t:
-        return ""
     try:
-        parts = str(t).strip().split(":")
-        h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
-        suffix = "AM" if h < 12 else "PM"
-        dh = h if h <= 12 else h - 12
-        if dh == 0:
-            dh = 12
-        return f"{dh}:{m:02d} {suffix}"
-    except:
-        return str(t)
+        h,m = map(int, str(t).split(":"))
+        ap = "AM" if h < 12 else "PM"
+        h12 = h % 12 or 12
+        return f"{h12}:{m:02d} {ap}"
+    except: return str(t)
+def fmt_custom(r):
+    if not r.startswith("custom:"): return r.title()
+    ds = r.replace("custom:","").split(",")
+    if sorted(ds) == ["fri","mon","thu","tue","wed"]: return "Mon–Fri"
+    if sorted(ds) == ["sat","sun"]: return "Weekends"
+    if sorted(ds) == sorted(DAYS): return "Daily"
+    return ", ".join(DAY_NAMES.get(d,d)[:3] for d in DAYS if d in ds)
+def home_kb(): return IKM([[IKB("＋ New", callback_data="add")]])
+def home_text(): return "Type a reminder:\n<i>\"Buy milk tomorrow at 5pm\"</i>"
+def guard(q, r):
+    if len(r) > 5 and r[5] != "pending": return True
+    return False
+def get_detail(r):
+    m = r[1] if len(r) > 1 else "?"
+    d = norm_date(r[2]) if len(r) > 2 else "?"
+    t = norm_time(r[3]) if len(r) > 3 else "?"
+    rp = r[4] if len(r) > 4 else "none"
+    return m, d, t, rp
+def row_detail(row):
+    try:
+        r = sheet.row_values(row)
+        if not r or len(r) < 6: return None, None, None, None, None
+        m, d, t, rp = get_detail(r)
+        return r, m, d, t, rp
+    except: return None, None, None, None, None
 
+# ========== NORMALIZE ==========
+def norm_date(v):
+    s = str(v).strip()
+    if not s: return ""
+    try:
+        f = float(s)
+        if f > 50000 or f < 1: return s
+        return (datetime(1899,12,30) + timedelta(days=int(f))).strftime("%Y-%m-%d")
+    except: pass
+    for fmt in ("%Y-%m-%d","%d/%m/%Y","%d-%m-%Y","%m/%d/%Y"):
+        try: return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except: continue
+    return s
+def norm_time(v):
+    s = str(v).strip()
+    if not s: return ""
+    try:
+        f = float(s)
+        h = int(f * 24); m = int((f * 24 - h) * 60)
+        return f"{h:02d}:{m:02d}"
+    except: pass
+    parsed = parse_time(s)
+    if parsed: return parsed
+    return s
+
+# ========== TIME PARSER ==========
+def parse_time(t):
+    t = t.strip().lower().replace(".",":")
+    m_ap = re.match(r'^(\d{1,2})(?:[:](\d{1,2}))?\s*(am|pm)$', t)
+    if m_ap:
+        h = int(m_ap.group(1)); mi = int(m_ap.group(2) or 0); ap = m_ap.group(3)
+        if ap == "pm" and h != 12: h += 12
+        if ap == "am" and h == 12: h = 0
+        if 0 <= h < 24 and 0 <= mi < 60: return f"{h:02d}:{mi:02d}"
+    m24 = re.match(r'^(\d{1,2})[:](\d{2})$', t)
+    if m24:
+        h = int(m24.group(1)); mi = int(m24.group(2))
+        if 0 <= h < 24 and 0 <= mi < 60: return f"{h:02d}:{mi:02d}"
+    return None
+
+# ========== TIMEZONE ==========
 def safe_tz(name):
-    try:
-        return pytz.timezone(name)
-    except:
-        return pytz.timezone(DEF_TZ)
-
+    try: return pytz.timezone(name)
+    except: return pytz.timezone(DEF_TZ)
 def get_tz(uid):
     cfg = get_cfg(uid)
     return safe_tz(cfg.get("timezone", DEF_TZ))
-
-def tz_short(name):
+def tz_label(name):
     for region in TZ_DATA.values():
-        for label, tzn in region:
-            if tzn == name:
-                dt = datetime.now(pytz.timezone(tzn))
-                off = dt.strftime("%z")
-                oh, om = off[:3], off[3:]
-                o = f"+{oh[1:]}:{om}" if off[0] == "+" else f"-{oh[1:]}:{om}"
-                if om == "00":
-                    o = off[:3]
-                return f"{label} ({o})"
+        for label, tz_name in region:
+            if tz_name == name: return label
     return name
+def tz_short(name):
+    now = datetime.now(safe_tz(name))
+    off = now.strftime("%z")
+    h, m = off[:3], off[3:]
+    off_str = f"+{h[1:]}:{m}" if off[0] == "+" else f"{h}:{m}"
+    if m == "00": off_str = off_str[:-3] if off[0] == "-" else f"+{h[1:]}"
+    return f"{tz_label(name)} ({off_str})"
 
-def norm_date(v):
-    s = str(v).strip()
-    try:
-        f = float(s)
-        if f > 50000 or f < 1:
-            return s
-        base = datetime(1899, 12, 30)
-        return (base + timedelta(days=int(f))).strftime("%Y-%m-%d")
-    except ValueError:
-        pass
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
-        except:
-            pass
-    return s
+# ========== SETTINGS ==========
+def get_cfg(uid):
+    uid_s = str(uid)
+    rows = cfg_sheet.get_all_values()
+    for i, r in enumerate(rows):
+        if str(r[0]) == uid_s:
+            return {"row": i+1, "digest_on": r[1] if len(r)>1 else "true",
+                    "digest_time": r[2] if len(r)>2 else DEF_DIGEST_TIME,
+                    "max_retries": r[3] if len(r)>3 else str(DEF_RETRIES),
+                    "retry_gap": r[4] if len(r)>4 else str(DEF_RETRY_GAP),
+                    "timezone": r[5] if len(r)>5 else DEF_TZ,
+                    "username": r[6] if len(r)>6 else "",
+                    "weekly_report": r[7] if len(r)>7 else "true"}
+    cfg_sheet.append_row([uid_s, "true", DEF_DIGEST_TIME, str(DEF_RETRIES), str(DEF_RETRY_GAP), DEF_TZ, "", "true"], value_input_option="RAW")
+    return {"row": len(rows)+1, "digest_on":"true", "digest_time":DEF_DIGEST_TIME,
+            "max_retries":str(DEF_RETRIES), "retry_gap":str(DEF_RETRY_GAP),
+            "timezone":DEF_TZ, "username":"", "weekly_report":"true"}
+def save_cfg(uid, key, val):
+    cfg = get_cfg(uid)
+    row = cfg["row"]
+    cols = {"digest_on":2,"digest_time":3,"max_retries":4,"retry_gap":5,"timezone":6,"username":7,"weekly_report":8}
+    if key in cols:
+        r = cfg_sheet.row_values(row)
+        while len(r) < 8: r.append(""); cfg_sheet.update_cell(row, len(r), "")
+        cfg_sheet.update_cell(row, cols[key], str(val))
+def update_username(user):
+    if not user or not user.username: return
+    try: save_cfg(user.id, "username", user.username.lower())
+    except: pass
+    USERNAME_CACHE[user.username.lower()] = (str(user.id), user.first_name or "")
+    UID_USERNAME[str(user.id)] = user.username.lower()
 
-def norm_time(v):
-    s = str(v).strip()
-    try:
-        f = float(s)
-        h = int(f * 24) if f < 1 else int(f)
-        m = int((f * 24 - h) * 60) if f < 1 else 0
-        return f"{h:02d}:{m:02d}"
-    except ValueError:
-        pass
-    return parse_time(s) or s
+# ========== GROUP HELPERS ==========
+def set_gsub(gid, uid, name, uname, sub=True):
+    gid_s, uid_s = str(gid), str(uid)
+    uname_l = (uname or "").lower()
+    rows = gm_sheet.get_all_values()
+    for i, r in enumerate(rows):
+        if str(r[0]) == gid_s and str(r[1]) == uid_s:
+            gm_sheet.update_cell(i+1, 3, name)
+            gm_sheet.update_cell(i+1, 4, uname_l)
+            gm_sheet.update_cell(i+1, 5, "true" if sub else "false")
+            return
+    gm_sheet.append_row([gid_s, uid_s, name, uname_l, "true" if sub else "false"], value_input_option="RAW")
+def get_gsubs(gid):
+    gid_s = str(gid)
+    rows = gm_sheet.get_all_values()
+    result = []
+    for r in rows[1:]:
+        if str(r[0]) == gid_s and len(r) > 4 and r[4] == "true":
+            uname = r[3] if len(r) > 3 else ""
+            result.append((r[1], r[2], uname))
+    return result
+def add_tmember(tid, uid, name, status="waiting"):
+    rows = tm_sheet.get_all_values()
+    for i, r in enumerate(rows):
+        if str(r[0]) == str(tid) and str(r[1]) == str(uid):
+            tm_sheet.update_cell(i+1, 4, status)
+            return
+    tm_sheet.append_row([str(tid), str(uid), name, status], value_input_option="RAW")
+def get_tmembers(tid):
+    rows = tm_sheet.get_all_values()
+    return [(r[1], r[2], r[3]) for r in rows[1:] if str(r[0]) == str(tid) and (len(r) < 4 or r[3] != "skipped")]
+def set_tstatus(tid, uid, status):
+    rows = tm_sheet.get_all_values()
+    for i, r in enumerate(rows):
+        if str(r[0]) == str(tid) and str(r[1]) == str(uid):
+            tm_sheet.update_cell(i+1, 4, status)
+            return
+def find_by_tid(tid):
+    rows = sheet.get_all_values()
+    for i, r in enumerate(rows):
+        if len(r) > 8 and r[8] == str(tid): return i+1, r
+    return None, None
 
-def parse_time(s):
-    s = s.strip().upper().replace(".", ":")
-    m_ap = re.match(r"^(\d{1,2})(?::(\d{1,2}))?\s*(AM|PM)$", s)
-    if m_ap:
-        h, mn, ap = int(m_ap.group(1)), int(m_ap.group(2) or 0), m_ap.group(3)
-        if h == 12:
-            h = 0 if ap == "AM" else 12
-        elif ap == "PM":
-            h += 12
-        if 0 <= h < 24 and 0 <= mn < 60:
-            return f"{h:02d}:{mn:02d}"
-    m24 = re.match(r"^(\d{1,2}):(\d{1,2})$", s)
-    if m24:
-        h, mn = int(m24.group(1)), int(m24.group(2))
-        if 0 <= h < 24 and 0 <= mn < 60:
-            return f"{h:02d}:{mn:02d}"
-    return None
+# ========== CALENDAR ==========
+def cal_kb(y, m, tz, back_cb="cancel", back_txt="✕ Cancel"):
+    now = datetime.now(tz)
+    import calendar
+    cal = calendar.Calendar(0)
+    weeks = cal.monthdayscalendar(y, m)
+    mn = datetime(y, m, 1).strftime("%B %Y")
+    rows = [[IKB(mn, callback_data="noop")]]
+    rows.append([IKB(d, callback_data="noop") for d in ["Mo","Tu","We","Th","Fr","Sa","Su"]])
+    today_btn = None; tmr_btn = None
+    for week in weeks:
+        all_past = True
+        row = []
+        for d in week:
+            if d == 0: row.append(IKB(" ", callback_data="noop"))
+            else:
+                dt = datetime(y, m, d)
+                if dt.date() < now.date(): row.append(IKB("·", callback_data="noop"))
+                else:
+                    all_past = False
+                    label = f"[{d}]" if dt.date() == now.date() else str(d)
+                    row.append(IKB(label, callback_data=f"day_{y}-{m:02d}-{d:02d}"))
+                    if dt.date() == now.date(): today_btn = True
+                    if dt.date() == now.date() + timedelta(days=1): tmr_btn = True
+        if not all_past: rows.append(row)
+    quick = []
+    if today_btn: quick.append(IKB("Today", callback_data=f"day_{now.strftime('%Y-%m-%d')}"))
+    if tmr_btn:
+        tmr = now + timedelta(days=1)
+        quick.append(IKB("Tomorrow", callback_data=f"day_{tmr.strftime('%Y-%m-%d')}"))
+    if quick: rows.append(quick)
+    pm = m - 1; py = y
+    if pm < 1: pm = 12; py -= 1
+    nm = m + 1; ny = y
+    if nm > 12: nm = 1; ny += 1
+    rows.append([IKB("‹", callback_data=f"cal_{py}-{pm:02d}"), IKB("›", callback_data=f"cal_{ny}-{nm:02d}")])
+    rows.append([IKB(back_txt, callback_data=back_cb)])
+    return IKM(rows)
 
+# ========== PAST CHECK ==========
 def is_past(ds, ts, tz):
     try:
         dt = tz.localize(datetime.strptime(f"{ds} {ts}", "%Y-%m-%d %H:%M"))
         return dt < datetime.now(tz)
-    except:
-        return False
+    except: return False
+def past_msg(ts): return f"⚠ {fmt_time(ts)} has already passed today.\nEnter a future time:"
 
-def past_msg(ts):
-    return f"\u26a0 {fmt_time(ts)} has already passed today.\nEnter a future time:"
-
-# ============= SETTINGS =============
-def get_cfg(uid):
-    uid_s = str(uid)
-    rows = cfg_sheet.get_all_values()
-    for r in rows[1:]:
-        if r and r[0] == uid_s:
-            return {"digest_on": r[1] if len(r) > 1 else "true",
-                    "digest_time": r[2] if len(r) > 2 else DEF_DIGEST_TIME,
-                    "max_retries": r[3] if len(r) > 3 else str(DEF_RETRIES),
-                    "retry_gap": r[4] if len(r) > 4 else str(DEF_RETRY_GAP),
-                    "timezone": r[5] if len(r) > 5 else DEF_TZ,
-                    "username": r[6] if len(r) > 6 else "",
-                    "weekly_report": r[7] if len(r) > 7 else "true"}
-    cfg_sheet.append_row([uid_s, "true", DEF_DIGEST_TIME, str(DEF_RETRIES), str(DEF_RETRY_GAP), DEF_TZ, "", "true"], value_input_option="RAW")
-    return {"digest_on": "true", "digest_time": DEF_DIGEST_TIME, "max_retries": str(DEF_RETRIES),
-            "retry_gap": str(DEF_RETRY_GAP), "timezone": DEF_TZ, "username": "", "weekly_report": "true"}
-
-def save_cfg(uid, key, val):
-    uid_s = str(uid)
-    rows = cfg_sheet.get_all_values()
-    col_map = {"digest_on": 2, "digest_time": 3, "max_retries": 4, "retry_gap": 5, "timezone": 6, "username": 7, "weekly_report": 8}
-    col = col_map.get(key)
-    if not col:
-        return
-    for i, r in enumerate(rows):
-        if r and r[0] == uid_s:
-            cfg_sheet.update_cell(i + 1, col, str(val))
-            return
-    get_cfg(uid)
-    save_cfg(uid, key, val)
-
-def update_username(user):
-    if not user:
-        return
-    uname = user.username or ""
-    if uname:
-        save_cfg(user.id, "username", uname)
-
-def get_user_retries(uid):
-    cfg = get_cfg(uid)
-    try:
-        return int(cfg.get("max_retries", DEF_RETRIES))
-    except:
-        return DEF_RETRIES
-
-def get_user_gap(uid):
-    cfg = get_cfg(uid)
-    try:
-        return int(cfg.get("retry_gap", DEF_RETRY_GAP)) * 60
-    except:
-        return DEF_RETRY_GAP * 60
-
-# ============= GROUP HELPERS =============
-def set_gsub(gid, uid, name, username="", sub=True):
-    gid_s, uid_s = str(gid), str(uid)
-    rows = grp_sheet.get_all_values()
-    for i, r in enumerate(rows[1:], start=2):
-        if len(r) >= 2 and r[0] == gid_s and r[1] == uid_s:
-            grp_sheet.update_cell(i, 3, name)
-            if username:
-                grp_sheet.update_cell(i, 4, username)
-            grp_sheet.update_cell(i, 5, "true" if sub else "false")
-            return
-    grp_sheet.append_row([gid_s, uid_s, name, username or "", "true" if sub else "false"], value_input_option="RAW")
-
-def get_gsubs(gid):
-    gid_s = str(gid)
-    rows = grp_sheet.get_all_values()
-    result = []
-    for r in rows[1:]:
-        if len(r) >= 5 and r[0] == gid_s and r[4].lower() == "true":
-            uname = r[3] if len(r) > 3 else ""
-            result.append((r[1], r[2], uname))
-    return result
-
-def add_tmember(tid, uid, name, status="waiting"):
-    tm_sheet.append_row([tid, str(uid), name, status], value_input_option="RAW")
-
-def get_tmembers(tid):
-    rows = tm_sheet.get_all_values()
-    return [(r[1], r[2], r[3]) for r in rows[1:] if r and r[0] == tid]
-
-def set_tstatus(tid, uid, status):
-    uid_s = str(uid)
-    rows = tm_sheet.get_all_values()
-    for i, r in enumerate(rows[1:], start=2):
-        if r and r[0] == tid and r[1] == uid_s:
-            tm_sheet.update_cell(i, 4, status)
-            return
-
-def reset_tmembers(tid):
-    rows = tm_sheet.get_all_values()
-    for i, r in enumerate(rows[1:], start=2):
-        if r and r[0] == tid:
-            tm_sheet.update_cell(i, 4, "waiting")
-
-# ============= REMINDER HELPERS =============
-def get_detail(r):
-    msg = r[1] if len(r) > 1 else ""
-    ds = norm_date(r[2]) if len(r) > 2 else ""
-    ts = norm_time(r[3]) if len(r) > 3 else ""
-    rep = r[4] if len(r) > 4 else "none"
-    st = r[5] if len(r) > 5 else "active"
-    return msg, ds, ts, rep, st
-
-def advance_rep(row, rep, ds, ts):
-    try:
-        d = datetime.strptime(ds, "%Y-%m-%d")
-    except:
-        return
-    if rep == "daily":
-        nd = d + timedelta(days=1)
-    elif rep == "weekly":
-        nd = d + timedelta(days=7)
-    elif rep == "monthly":
-        m = d.month + 1
-        y = d.year
-        if m > 12:
-            m, y = 1, y + 1
-        try:
-            nd = d.replace(year=y, month=m)
-        except:
-            nd = d.replace(year=y, month=m, day=28)
-    elif rep.startswith("custom:"):
-        days = rep.replace("custom:", "").split(",")
-        for i in range(1, 8):
-            nd = d + timedelta(days=i)
-            if DAY_NAMES[nd.weekday()] in days:
-                break
-        else:
-            nd = d + timedelta(days=1)
-    else:
-        return
-    sheet.update_cell(row, 3, nd.strftime("%Y-%m-%d"))
-    sheet.update_cell(row, 6, "active")
-    sheet.update_cell(row, 7, 0)
-
-def is_custom_match(rep, dt):
-    if not rep.startswith("custom:"):
-        return False
-    days = rep.replace("custom:", "").split(",")
-    return DAY_NAMES[dt.weekday()] in days
-
-# ============= UI HELPERS =============
-def home_kb():
-    return IKM([[IKB("\uff0b New", callback_data="add")]])
-
-HOME_TEXT = "Type your reminder:\n<i>\"Buy milk tomorrow at 5pm\"</i>\n\nOr tap \uff0b New for step-by-step."
-
-def cancel_kb():
-    return IKM([[IKB("\u2715 Cancel", callback_data="cancel")]])
-
+# ========== REPEAT ==========
 def repeat_kb(row=None):
     prefix = f"chrep_{row}_" if row else "rep_"
-    return IKM([
+    rows = [
         [IKB("Daily", callback_data=f"{prefix}daily"), IKB("Weekly", callback_data=f"{prefix}weekly")],
-        [IKB("Monthly", callback_data=f"{prefix}monthly"), IKB("Customize", callback_data=f"{prefix}custom")],
-        [IKB("\u00ab Back", callback_data=f"repbk_{row}" if row else "cancel")]
-    ])
-
+        [IKB("Monthly", callback_data=f"{prefix}monthly"), IKB("Customize", callback_data=f"{prefix}custom")]
+    ]
+    if row: rows.append([IKB("« Back", callback_data=f"view_{row}")])
+    return IKM(rows)
 def custom_days_kb(selected, row=None):
     prefix = f"cday_{row}_" if row else "cday__"
     save_cb = f"csave_{row}" if row else "csave_"
     back_cb = f"chrep_{row}_back" if row else "rep_back"
-    btns = []
-    r1, r2 = [], []
-    for i, d in enumerate(DAY_SHORT):
-        dn = DAY_NAMES[i]
-        label = f"[{d}]" if dn in selected else d
-        cb = f"{prefix}{dn}"
-        if i < 4:
-            r1.append(IKB(label, callback_data=cb))
-        else:
-            r2.append(IKB(label, callback_data=cb))
-    btns.append(r1)
-    btns.append(r2)
-    btns.append([IKB("Mon\u2013Fri", callback_data=f"{prefix}mf"),
-                 IKB("All", callback_data=f"{prefix}all"),
-                 IKB("Clear", callback_data=f"{prefix}clr")])
-    if selected:
-        btns.append([IKB("\u2713 Save", callback_data=save_cb)])
-    btns.append([IKB("\u00ab Back", callback_data=back_cb)])
-    return btns
+    sel = set(selected)
+    r1 = [IKB(f"{'✓ ' if d in sel else ''}{DAY_NAMES[d][:3]}", callback_data=f"{prefix}{d}") for d in DAYS[:4]]
+    r2 = [IKB(f"{'✓ ' if d in sel else ''}{DAY_NAMES[d][:3]}", callback_data=f"{prefix}{d}") for d in DAYS[4:]]
+    r3 = [IKB("Mon–Fri", callback_data=f"{prefix}mf"), IKB("All", callback_data=f"{prefix}all"), IKB("Clear", callback_data=f"{prefix}clear")]
+    rows = [r1, r2, r3]
+    if sel: rows.append([IKB("✓ Save", callback_data=save_cb)])
+    rows.append([IKB("« Back", callback_data=back_cb)])
+    return IKM(rows)
+def advance_rep(row, r):
+    rep = r[4] if len(r) > 4 else "none"
+    if rep == "none": return
+    d = datetime.strptime(norm_date(r[2]), "%Y-%m-%d")
+    if rep == "daily": nd = d + timedelta(days=1)
+    elif rep == "weekly": nd = d + timedelta(days=7)
+    elif rep == "monthly":
+        m = d.month + 1; y = d.year
+        if m > 12: m = 1; y += 1
+        try: nd = d.replace(year=y, month=m)
+        except: nd = d.replace(year=y, month=m, day=28)
+    elif rep.startswith("custom:"):
+        cdays = rep.replace("custom:","").split(",")
+        for i in range(1, 8):
+            nd = d + timedelta(days=i)
+            if DAYS[nd.weekday()] in cdays: break
+        else: nd = d + timedelta(days=1)
+    else: return
+    sheet.update_cell(row, 3, nd.strftime("%Y-%m-%d"))
+    sheet.update_cell(row, 6, "active")
+    sheet.update_cell(row, 7, 0)
 
-def snz_kb(row):
-    btns = []
-    r = []
-    for mins, label in SNOOZE_OPTIONS:
-        r.append(IKB(label, callback_data=f"snz_{row}_{mins}"))
-        if len(r) == 3:
-            btns.append(r)
-            r = []
-    if r:
-        btns.append(r)
-    btns.append([IKB("\u00ab Back", callback_data=f"snzb_{row}")])
-    return IKM(btns)
-
-def reminder_kb(row):
-    return IKM([[IKB("Snooze", callback_data=f"snzp_{row}"), IKB("\u2705 Done", callback_data=f"done_{row}")]])
-
-async def safe_edit(msg, text, kb=None):
-    try:
-        await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    except:
-        pass
-
-def store_prompt(ud, msg):
-    ud["p_mid"] = msg.message_id
-    ud["p_cid"] = msg.chat_id
-
-async def rm_prompt(ud, bot):
-    mid, cid = ud.pop("p_mid", None), ud.pop("p_cid", None)
-    if mid and cid:
-        try:
-            await bot.edit_message_reply_markup(cid, mid, reply_markup=None)
-        except:
-            pass
-
-async def del_prompt(ud, bot):
-    mid, cid = ud.pop("p_mid", None), ud.pop("p_cid", None)
-    if mid and cid:
-        try:
-            await bot.delete_message(cid, mid)
-        except:
-            pass
-
-def rm_home(ud, bot):
-    return rm_old_home(ud, bot)
-
-async def rm_old_home(ud, bot):
-    mid, cid = ud.pop("h_mid", None), ud.pop("h_cid", None)
-    if mid and cid:
-        try:
-            await bot.edit_message_reply_markup(cid, mid, reply_markup=None)
-        except:
-            pass
-
-# ============= CALENDAR =============
-def cal_kb(year, month, tz, back_cb="cancel", back_txt="\u2715 Cancel"):
-    now = datetime.now(tz)
-    today = now.date()
-    first_wd, ndays = cal_mod.monthrange(year, month)
-    header = f"{cal_mod.month_name[month]} {year}"
-    btns = [[IKB(header, callback_data="noop")]]
-    btns.append([IKB(d, callback_data="noop") for d in DAY_SHORT])
-    row = [IKB(" ", callback_data="noop")] * first_wd
-    for d in range(1, ndays + 1):
-        dt = datetime(year, month, d).date()
-        if dt < today:
-            row.append(IKB("\u00b7", callback_data="noop"))
-        elif dt == today:
-            row.append(IKB(f"[{d}]", callback_data=f"day_{dt.isoformat()}"))
-        else:
-            row.append(IKB(str(d), callback_data=f"day_{dt.isoformat()}"))
-        if len(row) == 7:
-            if not all(b.callback_data == "noop" or b.text == "\u00b7" for b in row):
-                btns.append(row)
-            row = []
-    if row:
-        row += [IKB(" ", callback_data="noop")] * (7 - len(row))
-        if not all(b.callback_data == "noop" or b.text == "\u00b7" for b in row):
-            btns.append(row)
-    quick = []
-    if today.month == month and today.year == year:
-        quick.append(IKB("Today", callback_data=f"day_{today.isoformat()}"))
-    tmrw = today + timedelta(days=1)
-    if tmrw.month == month and tmrw.year == year:
-        quick.append(IKB("Tomorrow", callback_data=f"day_{tmrw.isoformat()}"))
-    if quick:
-        btns.append(quick)
-    pm = month - 1 or 12
-    py = year - 1 if month == 1 else year
-    nm = month % 12 + 1
-    ny = year + 1 if month == 12 else year
-    btns.append([IKB("\u2039", callback_data=f"cal_{py}_{pm}"), IKB("\u203a", callback_data=f"cal_{ny}_{nm}")])
-    btns.append([IKB(back_txt, callback_data=back_cb)])
-    return IKM(btns)
-
-# ============= NL PARSER =============
+# ========== NL PARSER ==========
 def _find_time(text):
     patterns = [
-        (r'(?:at|by)\s+(\d{1,2})[:.](\d{2})\s*(am|pm)', re.I),
-        (r'(?:at|by)\s+(\d{1,2})\s*(am|pm)', re.I),
-        (r'(\d{1,2})[:.](\d{2})\s*(am|pm)', re.I),
-        (r'(\d{1,2})\s*(am|pm)', re.I),
-        (r'(?:at|by)\s+(\d{1,2}):(\d{2})\b', re.I),
+        r'(?:at|by|@)\s*(\d{1,2})[\.:]\s*(\d{2})\s*(am|pm)',
+        r'(?:at|by|@)\s*(\d{1,2})\s*(am|pm)',
+        r'(\d{1,2})[\.:]\s*(\d{2})\s*(am|pm)',
+        r'(\d{1,2})\s*(am|pm)',
+        r'(?:at|by|@)\s*(\d{1,2})[\.:](\d{2})(?:\s|$)',
     ]
-    for pat, flg in patterns:
-        m = re.search(pat, text, flg)
+    for p in patterns:
+        m = re.search(p, text, re.I)
         if m:
             gs = m.groups()
-            if len(gs) == 3 and gs[2]:
-                h, mn = int(gs[0]), int(gs[1]) if gs[1] else 0
-                ap = gs[2].upper()
-                if h == 12:
-                    h = 0 if ap == "AM" else 12
-                elif ap == "PM":
-                    h += 12
-            elif len(gs) == 2 and gs[1] and gs[1].upper() in ("AM", "PM"):
-                h, mn = int(gs[0]), 0
-                ap = gs[1].upper()
-                if h == 12:
-                    h = 0 if ap == "AM" else 12
-                elif ap == "PM":
-                    h += 12
-            else:
-                h, mn = int(gs[0]), int(gs[1]) if len(gs) > 1 and gs[1] else 0
-            if 0 <= h < 24 and 0 <= mn < 60:
-                return f"{h:02d}:{mn:02d}", m.start(), m.end()
+            if len(gs) == 3:
+                h, mi, ap = int(gs[0]), int(gs[1]), gs[2].lower()
+                if ap == "pm" and h != 12: h += 12
+                if ap == "am" and h == 12: h = 0
+            elif len(gs) == 2:
+                if gs[1].lower() in ("am","pm"):
+                    h, mi, ap = int(gs[0]), 0, gs[1].lower()
+                    if ap == "pm" and h != 12: h += 12
+                    if ap == "am" and h == 12: h = 0
+                else: h, mi = int(gs[0]), int(gs[1])
+            else: continue
+            if 0 <= h < 24 and 0 <= mi < 60:
+                return f"{h:02d}:{mi:02d}", m.start(), m.end()
     return None, -1, -1
 
 def _find_date(text, tz):
-    now = datetime.now(tz)
-    today = now.date()
-    lw = text.lower()
+    now = datetime.now(tz); today = now.date()
     patterns = [
-        (r'\b(today|tonight)\b', 0),
-        (r'\b(tomorrow|tmrw|tmr)\b', 1),
-        (r'\bday after tomorrow\b', 2),
+        (r'\b(today|tonight)\b', lambda m: today),
+        (r'\b(tomorrow|tmrw|tmr)\b', lambda m: today + timedelta(days=1)),
+        (r'\bday\s+after\s+tomorrow\b', lambda m: today + timedelta(days=2)),
+        (r'\bnext\s+week\b', lambda m: today + timedelta(days=7)),
     ]
-    for pat, delta in patterns:
-        m = re.search(pat, lw)
+    for d_name, d_short in DAY_SHORT.items():
+        def mk(dn):
+            def fn(m):
+                tgt = DAYS.index(dn)
+                diff = (tgt - today.weekday()) % 7
+                if diff == 0: diff = 7
+                return today + timedelta(days=diff)
+            return fn
+        patterns.append((rf'\b{d_name}\b', mk(d_short)))
+    date_pats = [
+        (r'\bon\s+(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*', 'dm'),
+        (r'\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*', 'dm'),
+        (r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+(\d{1,2})(?:st|nd|rd|th)?', 'md'),
+        (r'\bon\s+(\d{1,2})(?:st|nd|rd|th)\b', 'day_only'),
+    ]
+    for p, fn in patterns:
+        m = re.search(p, text, re.I)
+        if m: return fn(m).strftime("%Y-%m-%d"), m.start(), m.end()
+    months_map = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+    for p, fmt in date_pats:
+        m = re.search(p, text, re.I)
         if m:
-            d = today + timedelta(days=delta)
-            return d.strftime("%Y-%m-%d"), m.start(), m.end()
-    for i, dn in enumerate(DAY_NAMES):
-        full = DAY_FULL[i].lower()
-        pat = rf'\b(next\s+)?({full}|{dn})\b'
-        m = re.search(pat, lw)
-        if m:
-            diff = (i - today.weekday()) % 7
-            if diff == 0:
-                diff = 7
-            if m.group(1):
-                diff = (i - today.weekday()) % 7
-                if diff == 0:
-                    diff = 7
-            d = today + timedelta(days=diff)
-            return d.strftime("%Y-%m-%d"), m.start(), m.end()
-    m = re.search(r'\bon\s+(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*', lw)
-    if m:
-        day_n, mon_s = int(m.group(1)), m.group(2)
-        months = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
-        mn = months.get(mon_s[:3], 0)
-        if mn:
-            y = today.year if datetime(today.year, mn, day_n).date() >= today else today.year + 1
+            if fmt == 'dm':
+                day = int(m.group(1)); mon = months_map.get(m.group(2).lower()[:3], 1)
+            elif fmt == 'md':
+                mon = months_map.get(m.group(1).lower()[:3], 1); day = int(m.group(2))
+            elif fmt == 'day_only':
+                day = int(m.group(1)); mon = now.month
+                if day < now.day: mon += 1
+                if mon > 12: mon = 1
             try:
-                return datetime(y, mn, day_n).strftime("%Y-%m-%d"), m.start(), m.end()
-            except:
-                pass
-    m = re.search(r'\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b', lw)
-    if m:
-        day_n = int(m.group(1))
-        if 1 <= day_n <= 31:
-            try:
-                d = today.replace(day=day_n)
-                if d < today:
-                    nm = today.month + 1
-                    ny = today.year
-                    if nm > 12:
-                        nm, ny = 1, ny + 1
-                    d = d.replace(year=ny, month=nm)
-                return d.strftime("%Y-%m-%d"), m.start(), m.end()
-            except:
-                pass
-    m = re.search(r'\bnext week\b', lw)
-    if m:
-        d = today + timedelta(days=7)
-        return d.strftime("%Y-%m-%d"), m.start(), m.end()
+                y = now.year
+                dt = datetime(y, mon, day).date()
+                if dt < today: dt = datetime(y+1, mon, day).date()
+                return dt.strftime("%Y-%m-%d"), m.start(), m.end()
+            except: continue
     return None, -1, -1
 
 def _find_repeat(text, tz):
-    now = datetime.now(tz)
-    today = now.date()
-    lw = text.lower()
-    m = re.search(r'\bevery\s+day\b', lw)
+    now = datetime.now(tz); today = now.date()
+    m = re.search(r'\bevery\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\b', text, re.I)
     if m:
+        day_key = DAY_SHORT.get(m.group(1).lower())
+        if day_key:
+            tgt = DAYS.index(day_key)
+            diff = (tgt - today.weekday()) % 7
+            if diff == 0: diff = 7
+            dt = today + timedelta(days=diff)
+            return "weekly", m.start(), m.end(), dt.strftime("%Y-%m-%d")
+    if re.search(r'\bevery\s*day\b', text, re.I):
+        m = re.search(r'\bevery\s*day\b', text, re.I)
         return "daily", m.start(), m.end(), None
-    for i, dn in enumerate(DAY_NAMES):
-        full = DAY_FULL[i].lower()
-        pat = rf'\bevery\s+({full}|{dn}(?:s)?)\b'
-        m = re.search(pat, lw)
-        if m:
-            diff = (i - today.weekday()) % 7
-            if diff == 0:
-                diff = 7
-            nd = today + timedelta(days=diff)
-            return "weekly", m.start(), m.end(), nd.strftime("%Y-%m-%d")
-    for word, val in [("daily", "daily"), ("every day", "daily"), ("weekly", "weekly"),
-                      ("every week", "weekly"), ("monthly", "monthly"), ("every month", "monthly")]:
-        m = re.search(rf'\b{word}\b', lw)
-        if m:
-            return val, m.start(), m.end(), None
+    pats = [(r'\b(daily)\b', "daily"), (r'\b(weekly)\b', "weekly"), (r'\b(monthly)\b', "monthly")]
+    for p, rp in pats:
+        m = re.search(p, text, re.I)
+        if m: return rp, m.start(), m.end(), None
     return None, -1, -1, None
 
 def _find_relative(text, tz):
     now = datetime.now(tz)
-    lw = text.lower()
-    m = re.match(r'.*?\b(?:in|after)\s+(\d+)\s*(min(?:ute)?s?|hr?s?|hours?|days?|weeks?)\b', lw)
+    m = re.search(r'\b(?:in|after)\s+(\d+)\s*(min(?:ute)?s?|hrs?|hours?|days?|weeks?|h|m)\b', text, re.I)
     if m:
-        n = int(m.group(1))
-        unit = m.group(2).lower()
-        if unit.startswith("min"):
-            dt = now + timedelta(minutes=n)
-        elif unit.startswith("h"):
-            dt = now + timedelta(hours=n)
-        elif unit.startswith("d"):
-            dt = now + timedelta(days=n)
-        elif unit.startswith("w"):
-            dt = now + timedelta(weeks=n)
-        else:
-            return None, None, -1, -1
-        return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M"), m.start(0) + lw.index(m.group(0)[lw.index("in") if "in" in lw else lw.index("after"):].split()[0]), m.end()
+        n = int(m.group(1)); unit = m.group(2).lower()
+        if unit.startswith("m") and not unit.startswith("mo"): dt = now + timedelta(minutes=n)
+        elif unit.startswith("h"): dt = now + timedelta(hours=n)
+        elif unit.startswith("d"): dt = now + timedelta(days=n)
+        elif unit.startswith("w"): dt = now + timedelta(weeks=n)
+        else: return None, None, -1, -1
+        return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M"), m.start(), m.end()
     return None, None, -1, -1
+
+FILLER = re.compile(r"^(remind\s+me\s+to|remind\s+me|reminder|remember\s+to|don'?t\s+forget\s+to|set\s+reminder)\s+", re.I)
 
 def parse_nl_partial(text, tz):
     spans = []
-    rd, rt = _find_relative(text, tz)
-    if rd and rt:
-        m = re.search(r'\b(?:in|after)\s+\d+\s*(?:min(?:ute)?s?|hr?s?|hours?|days?|weeks?)\b', text, re.I)
-        if m:
-            spans.append((m.start(), m.end()))
-        rep, rs, re2, rep_date = _find_repeat(text, tz)
-        if rep and rs >= 0:
-            spans.append((rs, re2))
-        msg = _clean_msg(text, spans)
-        return {"message": msg, "date": rd, "time": rt, "repeat": rep} if msg else None
-    rep, rs, re2, rep_date = _find_repeat(text, tz)
-    if rep and rs >= 0:
-        spans.append((rs, re2))
-    t, ts, te = _find_time(text)
-    if t and ts >= 0:
-        spans.append((ts, te))
-    d, ds2, de2 = _find_date(text, tz)
-    if d and ds2 >= 0:
-        spans.append((ds2, de2))
-    if rep_date and not d:
-        d = rep_date
-    msg = _clean_msg(text, spans)
-    if not msg:
-        return None
-    if not t and not d and not rep:
-        prefix_m = FILLER.match(text)
-        if not prefix_m:
-            return None
-    result = {"message": msg}
-    if d:
-        result["date"] = d
-    if t:
-        result["time"] = t
-    if rep:
-        result["repeat"] = rep
-    return result
-
-def _clean_msg(text, spans):
-    if not spans:
-        msg = text
-    else:
-        spans.sort()
-        parts, last = [], 0
-        for s, e in spans:
-            if s > last:
-                parts.append(text[last:s])
-            last = max(last, e)
-        if last < len(text):
-            parts.append(text[last:])
-        msg = " ".join(parts)
+    rel_d, rel_t, rs, re_ = _find_relative(text, tz)
+    if rel_d: spans.append((rs, re_))
+    rep, rps, rpe, rep_date = _find_repeat(text, tz)
+    if rep: spans.append((rps, rpe))
+    t_val, ts, te = (None, -1, -1) if rel_t else _find_time(text)
+    if t_val: spans.append((ts, te))
+    d_val, ds, de = (None, -1, -1) if rel_d else _find_date(text, tz)
+    if d_val: spans.append((ds, de))
+    if rel_d: d_val = rel_d
+    if rel_t: t_val = rel_t
+    if rep_date and not d_val: d_val = rep_date
+    has_trigger = t_val or d_val or rep or FILLER.search(text)
+    if not has_trigger: return None
+    msg = text
+    for s, e in sorted(spans, reverse=True):
+        if s >= 0: msg = msg[:s] + msg[e:]
     msg = FILLER.sub("", msg).strip()
-    msg = re.sub(r'\s+', ' ', msg).strip(" .,;:-")
-    return msg
+    msg = re.sub(r'\s+', ' ', msg).strip(" .,;:-!?")
+    if not msg: return None
+    return {"message": msg, "date": d_val, "time": t_val, "repeat": rep}
 
-# ============= AUTO MINIMIZE =============
+# ========== PROMPT HELPERS ==========
+def store_prompt(ud, msg):
+    ud["p_mid"] = msg.message_id; ud["p_cid"] = msg.chat_id
+async def del_prompt(ctx, ud):
+    mid = ud.pop("p_mid", None); cid = ud.pop("p_cid", None)
+    if mid and cid:
+        try: await ctx.bot.delete_message(cid, mid)
+        except: pass
+async def rm_prompt_kb(ctx, ud):
+    mid = ud.pop("p_mid", None); cid = ud.pop("p_cid", None)
+    if mid and cid:
+        try: await ctx.bot.edit_message_reply_markup(cid, mid, reply_markup=None)
+        except: pass
+def store_home(ud, msg):
+    ud["h_mid"] = msg.message_id; ud["h_cid"] = msg.chat_id
+async def rm_home(ctx, ud):
+    mid = ud.pop("h_mid", None); cid = ud.pop("h_cid", None)
+    if mid and cid:
+        try: await ctx.bot.edit_message_reply_markup(cid, mid, reply_markup=None)
+        except: pass
+def store_rmsg(bd, row, mid, cid):
+    bd[f"rmsg_{row}"] = {"mid": mid, "cid": cid}
+async def rm_old_rmsg(ctx, bd, row):
+    key = f"rmsg_{row}"
+    d = bd.pop(key, None)
+    if d:
+        try: await ctx.bot.edit_message_reply_markup(d["cid"], d["mid"], reply_markup=None)
+        except: pass
+async def safe_edit(msg, text, kb=None):
+    try: await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except: pass
+
+# ========== SNOOZE KB ==========
+def snz_kb(row):
+    rows_btn = []
+    for i in range(0, len(SNOOZE_OPTIONS), 3):
+        chunk = SNOOZE_OPTIONS[i:i+3]
+        rows_btn.append([IKB(label, callback_data=f"snz_{row}_{mins}") for label, mins in chunk])
+    rows_btn.append([IKB("« Back", callback_data=f"snzb_{row}")])
+    return IKM(rows_btn)
+def reminder_kb(row):
+    return IKM([[IKB("Snooze", callback_data=f"snzp_{row}"), IKB("✅ Done", callback_data=f"done_{row}")]])
+
+# ========== TAG HELPERS ==========
+def extract_tag_texts(msg):
+    if not msg or not msg.entities: return []
+    tags = []
+    for ent in msg.entities:
+        if ent.type == "mention":
+            uname = msg.text[ent.offset+1:ent.offset+ent.length].lower()
+            tags.append(uname)
+        elif ent.type == "text_mention" and ent.user:
+            tags.append(str(ent.user.id))
+    return tags
+
+def is_subscriber_tagged(sub_uid, sub_name, sub_uname, tags):
+    for tag in tags:
+        if tag == str(sub_uid): return True
+        if sub_uname and tag == sub_uname.lower(): return True
+        cached_uname = UID_USERNAME.get(str(sub_uid), "")
+        if cached_uname and tag == cached_uname: return True
+    return False
+
+# ========== SEND & TRACK ==========
+async def send_and_track(ctx, chat_id, text, kb, track_key=None, track_cid=None):
+    try:
+        msg = await ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML")
+        if track_key: ctx.bot_data[track_key] = {"mid": msg.message_id, "cid": track_cid or chat_id}
+        return msg
+    except: return None
+
+# ========== GROUP STATUS ==========
+def gstatus_text(tid, msg):
+    members = get_tmembers(tid)
+    if not members: return f"{msg}\n\n<i>No subscribers</i>"
+    active = [(u, n, s) for u, n, s in members if s != "skipped"]
+    if not active: return f"{msg}\n\n<i>No active subscribers</i>"
+    all_done = all(s in ("done","missed") for _,_,s in active)
+    if all_done and all(s == "done" for _,_,s in active):
+        names = ", ".join(n for _,n,_ in active)
+        return f"{msg} · ✅ All done\n{names}"
+    parts = " · ".join(f"{GT_IC.get(s,'⏳')} {n}" for _, n, s in active)
+    prefix = "⏰ " if any(s not in ("done","missed") for _,_,s in active) else ""
+    return f"{prefix}{msg}\n\n{parts}"
+
+async def update_gstatus(ctx, tid, msg):
+    key = f"gstatus_{tid}"
+    d = ctx.bot_data.get(key)
+    if not d: return
+    text = gstatus_text(tid, msg)
+    try: await ctx.bot.edit_message_text(text, chat_id=d["cid"], message_id=d["mid"], parse_mode="HTML")
+    except: pass
+
+# ========== AUTO MINIMIZE ==========
 async def p_auto_minimize(ctx):
     d = ctx.job.data
-    try:
-        await ctx.bot.edit_message_text(
-            chat_id=d["cid"], message_id=d["mid"],
-            text=d["min_text"], parse_mode="HTML",
-            reply_markup=IKM([[IKB("\U0001f4cb Show", callback_data=d["show_cb"])]])
-        )
-    except:
-        pass
+    mid = d.get("mid"); cid = d.get("cid")
+    min_text = d.get("min_text", "📋"); show_cb = d.get("show_cb", "noop")
+    try: await ctx.bot.edit_message_text(min_text, chat_id=cid, message_id=mid, reply_markup=IKM([[IKB("📋 Show", callback_data=show_cb)]]), parse_mode="HTML")
+    except: pass
 
-def schedule_minimize(ctx, cid, mid, min_text, show_cb, delay=60):
-    ctx.job_queue.run_once(p_auto_minimize, delay, data={"cid": cid, "mid": mid, "min_text": min_text, "show_cb": show_cb})
-
-# ============= GROUP AUTO MINIMIZE =============
 async def g_auto_minimize(ctx):
     d = ctx.job.data
-    try:
-        await ctx.bot.edit_message_text(
-            chat_id=d["cid"], message_id=d["mid"],
-            text=d["min_text"], parse_mode="HTML",
-            reply_markup=IKM([[IKB("\U0001f4cb Show", callback_data=d["show_cb"])]])
-        )
-    except:
-        pass
+    mid = d.get("mid"); cid = d.get("cid")
+    min_text = d.get("min_text", "📋"); show_cb = d.get("show_cb", "noop")
+    try: await ctx.bot.edit_message_text(min_text, chat_id=cid, message_id=mid, reply_markup=IKM([[IKB("📋 Show", callback_data=show_cb)]]), parse_mode="HTML")
+    except: pass
 
-# ============= COMMANDS =============
-async def start(update, ctx):
-    uid = update.effective_user.id
+# ========== COMMANDS ==========
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     update_username(update.effective_user)
-    if update.effective_chat.type != "private":
-        txt = (f"{hdr('Smart Reminder Bot')}\n\n"
-               "<b>Commands</b>\n"
-               "/remind \u2014 Group reminder\n"
-               "/list \u2014 Active reminders\n\n"
-               "<b>Examples</b>\n"
-               "<code>/remind Buy milk at 5pm</code>\n"
-               "<code>/remind Meeting tomorrow 10am daily</code>\n"
-               "<code>/remind</code> \u2014 step-by-step\n\n"
-               "<b>Tag members to assign:</b>\n"
-               "<code>/remind @user Submit report at 5pm</code>")
-        sent = await update.message.reply_text(txt, parse_mode="HTML",
-            reply_markup=IKM([[IKB("\u2715 Close", callback_data="gclose")]]))
-        gid = update.effective_chat.id
-        ctx.bot_data[f"gmin_{sent.message_id}"] = {"text": txt, "min_text": "Smart Reminder Bot",
-            "show_cb": f"gshow_start_{sent.message_id}"}
-        ctx.job_queue.run_once(g_auto_minimize, 30, data={"cid": gid, "mid": sent.message_id,
-            "min_text": "Smart Reminder Bot", "show_cb": f"gshow_start_{sent.message_id}"})
+    chat = update.effective_chat
+    if chat.type != "private":
+        text = f"{hdr('Smart Reminder Bot')}\n\n<b>Commands</b>\n/remind — Group reminder\n/list — Active reminders\n\n<b>Examples</b>\n<code>/remind Buy milk at 5pm</code>\n<code>/remind Meeting tomorrow 10am daily</code>\n<code>/remind</code> — step-by-step\n\nTag members to assign:\n<code>/remind @user Submit report at 5pm</code>"
+        msg = await update.message.reply_text(text, parse_mode="HTML", reply_markup=IKM([[IKB("✕ Close", callback_data="gclose")]]))
+        ctx.bot_data[f"gmin_{msg.message_id}"] = {"text": "<b>Smart Reminder Bot</b>", "show_cb": f"gshow_start_{msg.message_id}"}
+        ctx.bot_data[f"gfull_{msg.message_id}"] = text
+        ctx.job_queue.run_once(g_auto_minimize, 60, data={"mid": msg.message_id, "cid": chat.id, "min_text": "<b>Smart Reminder Bot</b>", "show_cb": f"gshow_start_{msg.message_id}"})
         return
-    await rm_old_home(ctx.user_data, ctx.bot)
-    sent = await update.message.reply_text(f"{hdr('Smart Reminder Bot')}\n\n{HOME_TEXT}", parse_mode="HTML", reply_markup=home_kb())
-    ctx.user_data["h_mid"] = sent.message_id
-    ctx.user_data["h_cid"] = sent.chat_id
+    ud = ctx.user_data
+    await rm_home(ctx, ud)
+    msg = await update.message.reply_text(f"{hdr('Smart Reminder Bot')}\n\n{home_text()}", reply_markup=home_kb(), parse_mode="HTML")
+    store_home(ud, msg)
 
-async def add_cmd(update, ctx):
+async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    update_username(update.effective_user)
     if update.effective_chat.type != "private":
         await update.message.reply_text("Use /remind here for group reminders.")
         return
-    update_username(update.effective_user)
-    ctx.user_data.clear()
-    ctx.user_data["step"] = "message"
-    sent = await update.message.reply_text(f"{hdr('New Reminder')}\nEnter message:", parse_mode="HTML", reply_markup=cancel_kb())
-    store_prompt(ctx.user_data, sent)
+    ud = ctx.user_data
+    await rm_home(ctx, ud)
+    ud["step"] = "message"
+    msg = await update.message.reply_text(f"{hdr('New Reminder')}\nEnter message:", reply_markup=IKM([[IKB("✕ Cancel", callback_data="cancel")]]), parse_mode="HTML")
+    store_prompt(ud, msg)
 
-async def list_cmd(update, ctx):
+async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     update_username(update.effective_user)
-    if update.effective_chat.type != "private":
-        await _group_list(update, ctx)
+    chat = update.effective_chat
+    if chat.type != "private":
+        gid = str(chat.id)
+        set_gsub(gid, update.effective_user.id, update.effective_user.first_name, (update.effective_user.username or "").lower())
+        rows = sheet.get_all_values()
+        items = []
+        for i, r in enumerate(rows[1:], start=2):
+            if len(r) < 8: continue
+            if str(r[7]) != gid: continue
+            if r[5] in ("done","cancelled"): continue
+            m, d, t, rp = get_detail(r)
+            items.append((i, m, d, t, r[5]))
+        if not items:
+            msg = await update.message.reply_text("<b>Group Reminders</b> — No active", parse_mode="HTML", reply_markup=IKM([[IKB("✕ Close", callback_data="gclose")]]))
+            ctx.bot_data[f"gmin_{msg.message_id}"] = {"text": "<b>Group Reminders</b> — No active", "show_cb": "noop"}
+            ctx.job_queue.run_once(g_auto_minimize, 60, data={"mid": msg.message_id, "cid": chat.id, "min_text": "<b>Group Reminders</b> — No active", "show_cb": "noop"})
+            return
+        lines = [hdr("Group Reminders"), ""]
+        for idx, (i, m, d, t, s) in enumerate(items, 1):
+            ic = ST_IC.get(s, "○")
+            lines.append(f"{idx} {ic} {m[:30]}{'…' if len(m)>30 else ''}\n   {fmt_date(d)} · {fmt_time(t)}")
+        text = "\n".join(lines)
+        msg = await update.message.reply_text(text, parse_mode="HTML", reply_markup=IKM([[IKB("✕ Close", callback_data="gclose")]]))
+        ctx.bot_data[f"gmin_{msg.message_id}"] = {"text": f"<b>Group Reminders</b> ({len(items)})", "show_cb": f"gshow_list_{gid}_{msg.message_id}"}
+        ctx.bot_data[f"gfull_{msg.message_id}"] = text
+        ctx.job_queue.run_once(g_auto_minimize, 60, data={"mid": msg.message_id, "cid": chat.id, "min_text": f"<b>Group Reminders</b> ({len(items)})", "show_cb": f"gshow_list_{gid}_{msg.message_id}"})
         return
-    await _private_list(update, ctx, new=True)
+    await show_list(update, ctx, new=True)
 
-async def _private_list(update_or_query, ctx, new=True):
-    uid = update_or_query.effective_user.id if hasattr(update_or_query, "effective_user") else update_or_query.from_user.id
+async def show_list(update, ctx, new=True):
+    uid = update.effective_user.id
+    ud = ctx.user_data
     rows = sheet.get_all_values()
     items = []
-    uid_s = str(uid)
     for i, r in enumerate(rows[1:], start=2):
-        if not r or r[0] != uid_s:
-            continue
-        if len(r) > 7 and r[7]:
-            continue
-        st = r[5] if len(r) > 5 else ""
-        if st in ("active", "pending", "snoozed", "missed"):
-            msg, ds, ts, rep, _ = get_detail(r)
-            items.append((i, msg, ds, ts, rep, st))
+        if str(r[0]) != str(uid): continue
+        if len(r) < 6: continue
+        if r[5] in ("done","cancelled"): continue
+        if len(r) > 7 and r[7]: continue
+        m, d, t, rp = get_detail(r)
+        items.append((i, m, d, t, r[5]))
     if not items:
-        txt = f"{hdr('Reminders')}\n\nNo active reminders."
+        text = f"{hdr('Reminders')}\n\nNo active reminders."
         if new:
-            target = update_or_query.message if hasattr(update_or_query, "message") and hasattr(update_or_query.message, "reply_text") else update_or_query
-            sent = await target.reply_text(txt, parse_mode="HTML", reply_markup=IKM([[IKB("\u2715 Close", callback_data="pclose_list")], [IKB("\uff0b New", callback_data="add")]]))
+            msg = await update.effective_message.reply_text(text, reply_markup=IKM([[IKB("« Back", callback_data="home")]]), parse_mode="HTML")
         else:
-            sent = update_or_query.message if hasattr(update_or_query, "message") else update_or_query
-            await safe_edit(sent, txt, IKM([[IKB("\u2715 Close", callback_data="pclose_list")], [IKB("\uff0b New", callback_data="add")]]))
+            await safe_edit(update.effective_message, text, IKM([[IKB("« Back", callback_data="home")]]))
         return
     lines = [hdr("Reminders"), ""]
-    for idx, (row, msg, ds, ts, rep, st) in enumerate(items):
-        ic = ST_IC.get(st, "\u25cb")
-        short_msg = msg[:25] + "\u2026" if len(msg) > 25 else msg
-        dts = fmt_date(ds)
-        tts = fmt_time(ts)
-        lines.append(f"{idx+1} {ic} {short_msg}\n   {dts} \u00b7 {tts}")
-    txt = "\n".join(lines)
-    num_btns = []
+    for idx, (i, m, d, t, s) in enumerate(items, 1):
+        ic = ST_IC.get(s, "○")
+        lines.append(f"{idx} {ic} {m[:30]}{'…' if len(m)>30 else ''}\n   {fmt_date(d)} · {fmt_time(t)}")
+    text = "\n".join(lines)
+    btns = []
     row_btns = []
-    for idx, (row, *_) in enumerate(items):
-        row_btns.append(IKB(str(idx + 1), callback_data=f"view_{row}"))
+    for idx, (i, *_) in enumerate(items, 1):
+        row_btns.append(IKB(str(idx), callback_data=f"view_{i}"))
         if len(row_btns) == 5:
-            num_btns.append(row_btns)
-            row_btns = []
-    if row_btns:
-        num_btns.append(row_btns)
-    num_btns.append([IKB("\u2715 Close", callback_data="pclose_list")])
-    num_btns.append([IKB("\uff0b New", callback_data="add")])
-    kb = IKM(num_btns)
+            btns.append(row_btns); row_btns = []
+    if row_btns: btns.append(row_btns)
+    btns.append([IKB("« Back", callback_data="home")])
+    kb = IKM(btns)
     if new:
-        target = update_or_query.message if hasattr(update_or_query, "message") and not isinstance(update_or_query.message, type(None)) else update_or_query
-        if hasattr(target, "reply_text"):
-            sent = await target.reply_text(txt, parse_mode="HTML", reply_markup=kb)
-            count = len(items)
-            schedule_minimize(ctx, sent.chat_id, sent.message_id,
-                f"\U0001f4cb Reminders ({count} active)", f"pshow_list_{sent.message_id}", 60)
-        else:
-            await safe_edit(target, txt, kb)
+        msg = await update.effective_message.reply_text(text, reply_markup=kb, parse_mode="HTML")
+        ctx.job_queue.run_once(p_auto_minimize, 60, data={"mid": msg.message_id, "cid": update.effective_chat.id, "min_text": f"<b>📋 Reminders</b> ({len(items)})", "show_cb": "pshow_list"})
     else:
-        target = update_or_query.message if hasattr(update_or_query, "message") else update_or_query
-        await safe_edit(target, txt, kb)
+        await safe_edit(update.effective_message, text, kb)
 
-async def _group_list(update, ctx):
-    gid = update.effective_chat.id
-    rows = sheet.get_all_values()
-    gid_s = str(gid)
-    items = []
-    for i, r in enumerate(rows[1:], start=2):
-        if len(r) <= 7 or r[7] != gid_s:
-            continue
-        st = r[5] if len(r) > 5 else ""
-        if st in ("active", "pending", "snoozed"):
-            msg, ds, ts, rep, _ = get_detail(r)
-            items.append((i, msg, ds, ts, rep, st))
-    if not items:
-        txt = f"{hdr('Group Reminders')}\n\nNo active reminders."
-        sent = await update.message.reply_text(txt, parse_mode="HTML",
-            reply_markup=IKM([[IKB("\u2715 Close", callback_data="gclose")]]))
-        ctx.bot_data[f"gmin_{sent.message_id}"] = {"text": txt, "min_text": "Group Reminders \u2014 No active",
-            "show_cb": f"gshow_list_{gid}_{sent.message_id}"}
-        ctx.job_queue.run_once(g_auto_minimize, 30, data={"cid": gid, "mid": sent.message_id,
-            "min_text": "Group Reminders \u2014 No active", "show_cb": f"gshow_list_{gid}_{sent.message_id}"})
-        return
-    lines = [hdr("Group Reminders"), ""]
-    for idx, (row, msg, ds, ts, rep, st) in enumerate(items):
-        short = msg[:25] + "\u2026" if len(msg) > 25 else msg
-        lines.append(f"{idx+1} {ST_IC.get(st, '\u25cb')} {short}\n   {fmt_date(ds)} \u00b7 {fmt_time(ts)}")
-    txt = "\n".join(lines)
-    btns = []
-    rb = []
-    for idx, (row, *_) in enumerate(items):
-        rb.append(IKB(str(idx+1), callback_data=f"gview_{row}"))
-        if len(rb) == 5:
-            btns.append(rb)
-            rb = []
-    if rb:
-        btns.append(rb)
-    btns.append([IKB("\u2715 Close", callback_data="gclose")])
-    sent = await update.message.reply_text(txt, parse_mode="HTML", reply_markup=IKM(btns))
-    ctx.bot_data[f"gmin_{sent.message_id}"] = {"text": txt, "min_text": f"Group Reminders ({len(items)})",
-        "show_cb": f"gshow_list_{gid}_{sent.message_id}", "kb": btns}
-    ctx.job_queue.run_once(g_auto_minimize, 60, data={"cid": gid, "mid": sent.message_id,
-        "min_text": f"Group Reminders ({len(items)})", "show_cb": f"gshow_list_{gid}_{sent.message_id}"})
-
-async def info_cmd(update, ctx):
+async def settings_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     update_username(update.effective_user)
-    txt = (f"{hdr('About')}\n\n"
-           "Smart Reminder Bot\n\n"
-           "<b>Quick:</b> Type naturally\n"
-           "<i>\"Buy milk tomorrow at 5pm\"</i>\n"
-           "<i>\"Meeting in 30 min\"</i>\n"
-           "<i>\"Gym at 6pm daily\"</i>\n"
-           "<i>\"Standup every monday 10am\"</i>\n\n"
-           "<b>Features:</b>\n"
-           "\u2022 Smart snooze (15m\u201312h)\n"
-           "\u2022 Auto-retry if missed\n"
-           "\u2022 Daily digest\n"
-           "\u2022 Weekly report\n"
-           "\u2022 Custom days (Mon\u2013Fri)\n"
-           "\u2022 Monthly schedule view\n"
-           "\u2022 Group reminders\n"
-           "\u2022 Per-user timezone\n\n"
-           "Tip: Add \"daily\", \"weekly\" or \"monthly\" to set recurring.")
-    sent = await update.message.reply_text(txt, parse_mode="HTML",
-        reply_markup=IKM([[IKB("\u2715 Close", callback_data="pclose_info")], [IKB("\uff0b New", callback_data="add")]]))
-    schedule_minimize(ctx, sent.chat_id, sent.message_id,
-        "\u2139\ufe0f Info", f"pshow_info_{sent.message_id}", 60)
-    ctx.bot_data[f"pinfo_{sent.message_id}"] = txt
+    if update.effective_chat.type != "private": return
+    await show_settings(update.effective_message, update.effective_user.id, new=True)
 
-async def settings_cmd(update, ctx):
-    update_username(update.effective_user)
-    if update.effective_chat.type != "private":
-        return
-    uid = update.effective_user.id
+async def show_settings(msg, uid, new=True):
     cfg = get_cfg(uid)
-    await _show_settings(update.message, cfg, new=True)
+    don = "ON" if cfg["digest_on"] == "true" else "OFF"
+    dt = fmt_time(cfg["digest_time"])
+    mr = cfg["max_retries"]; rg = cfg["retry_gap"]
+    tz = tz_label(cfg.get("timezone", DEF_TZ))
+    wr = "ON" if cfg.get("weekly_report","true") == "true" else "OFF"
+    text = f"{hdr('Settings')}\n\nDaily Digest: {don} · {dt}\nMax Retries: {mr}×\nRetry Gap: {rg} min\nTimezone: {tz}\nWeekly Report: {wr}"
+    kb = IKM([
+        [IKB(f"Digest: {don}", callback_data="cfg_digest"), IKB(f"⏰ {dt}", callback_data="cfg_dtime")],
+        [IKB(f"Retries: {mr}×", callback_data="cfg_retries"), IKB(f"Gap: {rg}m", callback_data="cfg_gap")],
+        [IKB(f"🌍 {tz}", callback_data="cfg_tz")],
+        [IKB(f"Report: {wr}", callback_data="cfg_report")],
+        [IKB("« Back", callback_data="home")]
+    ])
+    if new: await msg.reply_text(text, reply_markup=kb, parse_mode="HTML")
+    else: await safe_edit(msg, text, kb)
 
-async def _show_settings(target, cfg, new=True):
-    dig = "ON" if cfg.get("digest_on", "true") == "true" else "OFF"
-    dt = fmt_time(cfg.get("digest_time", DEF_DIGEST_TIME))
-    ret = cfg.get("max_retries", str(DEF_RETRIES))
-    gap = cfg.get("retry_gap", str(DEF_RETRY_GAP))
-    tz_name = cfg.get("timezone", DEF_TZ)
-    tz_label = tz_short(tz_name)
-    wr = "ON" if cfg.get("weekly_report", "true") == "true" else "OFF"
-    txt = (f"{hdr('Settings')}\n\n"
-           f"Daily Digest: {dig} \u00b7 {dt}\n"
-           f"Max Retries: {ret}\u00d7\n"
-           f"Retry Gap: {gap} min\n"
-           f"Timezone: {tz_label}\n"
-           f"Weekly Report: {wr}")
-    btns = [
-        [IKB(f"Digest: {dig}", callback_data="cfg_digest"), IKB(f"\u23f0 {dt}", callback_data="cfg_digtime")],
-        [IKB(f"Retries: {ret}\u00d7", callback_data="cfg_retries"), IKB(f"Gap: {gap}m", callback_data="cfg_gap")],
-        [IKB(f"\U0001f30d {tz_label}", callback_data="cfg_tz")],
-        [IKB(f"Report: {wr}", callback_data="cfg_weekly")],
-        [IKB("\u00ab Back", callback_data="back_home")]
-    ]
-    if new:
-        await target.reply_text(txt, parse_mode="HTML", reply_markup=IKM(btns))
-    else:
-        await safe_edit(target, txt, IKM(btns))
-
-async def month_cmd(update, ctx):
+async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     update_username(update.effective_user)
-    if update.effective_chat.type != "private":
-        return
-    uid = update.effective_user.id
-    tz = get_tz(uid)
-    now = datetime.now(tz)
-    sent = await update.message.reply_text("Loading...", parse_mode="HTML")
-    txt, kb = _build_month(uid, now.year, now.month, tz)
-    await safe_edit(sent, txt, kb)
-    schedule_minimize(ctx, sent.chat_id, sent.message_id,
-        f"\U0001f4c5 {cal_mod.month_name[now.month]} {now.year}", f"pshow_month_{now.year}_{now.month}_{sent.message_id}", 60)
+    if update.effective_chat.type != "private": return
+    text = f"""{hdr('Smart Reminder Bot')}
 
-def _build_month(uid, year, month, tz):
+<b>Just type naturally:</b>
+<code>Buy milk tomorrow at 5pm</code>
+<code>Gym at 6pm daily</code>
+<code>Meeting in 30 min</code>
+<code>Call mom every monday at 9am</code>
+
+<b>Features:</b>
+• Smart snooze (15m – 12h)
+• Auto-retry if missed
+• Daily digest
+• Weekly report
+• Monthly schedule
+• Custom repeat days
+• Group reminders
+• Per-user timezone
+
+<b>Commands:</b>
+/add — Step-by-step reminder
+/list — View reminders
+/month — Monthly schedule
+/settings — Preferences"""
+    msg = await update.message.reply_text(text, reply_markup=IKM([[IKB("✕ Close", callback_data="pclose_info")], [IKB("＋ New", callback_data="add")]]), parse_mode="HTML")
+    ctx.bot_data[f"pinfo_{msg.message_id}"] = text
+    ctx.job_queue.run_once(p_auto_minimize, 60, data={"mid": msg.message_id, "cid": update.effective_chat.id, "min_text": "<b>ℹ️ Info</b>", "show_cb": f"pshow_info_{msg.message_id}"})
+
+# ========== MONTH VIEW ==========
+async def month_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    update_username(update.effective_user)
+    if update.effective_chat.type != "private": return
+    tz = get_tz(update.effective_user.id)
     now = datetime.now(tz)
-    today = now.date()
-    first_day = datetime(year, month, 1).date()
-    _, ndays = cal_mod.monthrange(year, month)
-    last_day = datetime(year, month, ndays).date()
-    rows_data = sheet.get_all_values()
-    uid_s = str(uid)
-    reminders = []
-    for i, r in enumerate(rows_data[1:], start=2):
-        if not r or r[0] != uid_s:
-            continue
-        if len(r) > 7 and r[7]:
-            continue
-        msg, ds, ts, rep, st = get_detail(r)
-        if not ds:
-            continue
-        reminders.append((i, msg, ds, ts, rep, st))
-    all_events = _expand_for_range(reminders, first_day, last_day, today)
+    msg = await update.message.reply_text("Loading...", parse_mode="HTML")
+    text, kb = build_month_view(update.effective_user.id, now.year, now.month, tz)
+    await safe_edit(msg, text, kb)
+    ctx.job_queue.run_once(p_auto_minimize, 60, data={"mid": msg.message_id, "cid": update.effective_chat.id, "min_text": f"<b>📅 {now.strftime('%B %Y')}</b>", "show_cb": f"pshow_month_{now.year}_{now.month}"})
+
+def build_month_view(uid, year, month, tz):
+    import calendar
+    now = datetime.now(tz); today = now.date()
+    first = datetime(year, month, 1).date()
+    if month == 12: last = datetime(year+1, 1, 1).date() - timedelta(days=1)
+    else: last = datetime(year, month+1, 1).date() - timedelta(days=1)
+    rows = sheet.get_all_values()
+    all_events = []
+    for i, r in enumerate(rows[1:], start=2):
+        if str(r[0]) != str(uid): continue
+        if len(r) < 6: continue
+        if len(r) > 7 and r[7]: continue
+        m, d, t, rp = get_detail(r)
+        try: rd = datetime.strptime(d, "%Y-%m-%d").date()
+        except: continue
+        if rp == "none":
+            if first <= rd <= last: all_events.append((rd, t, m, r[5]))
+        else:
+            cur = first
+            while cur <= last:
+                if rp == "daily":
+                    if cur >= rd: all_events.append((cur, t, m, r[5] if cur < today else "active"))
+                elif rp == "weekly":
+                    if cur >= rd and cur.weekday() == rd.weekday(): all_events.append((cur, t, m, r[5] if cur < today else "active"))
+                elif rp == "monthly":
+                    if cur >= rd and cur.day == rd.day: all_events.append((cur, t, m, r[5] if cur < today else "active"))
+                elif rp.startswith("custom:"):
+                    cdays = rp.replace("custom:","").split(",")
+                    if cur >= rd and DAYS[cur.weekday()] in cdays: all_events.append((cur, t, m, r[5] if cur < today else "active"))
+                cur += timedelta(days=1)
+    cal_obj = calendar.Calendar(0)
+    weeks_raw = cal_obj.monthdayscalendar(year, month)
     weeks = []
-    d = first_day
-    while d <= last_day:
-        ws = d
-        we = min(d + timedelta(days=6 - d.weekday()), last_day)
-        week_events = [e for e in all_events if ws <= e[0] <= we]
-        weeks.append((ws, we, week_events))
-        d = we + timedelta(days=1)
-    while len(weeks) < 4:
-        weeks.append((last_day, last_day, []))
-    if len(weeks) > 4:
-        extra = []
-        for ev in weeks[4:]:
-            extra.extend(ev[2])
-        ws3, _, evs3 = weeks[3]
-        weeks[3] = (ws3, last_day, evs3 + extra)
-        weeks = weeks[:4]
-    total, done_c, missed_c, upcoming_c = 0, 0, 0, 0
-    for ev_list in [w[2] for w in weeks]:
-        for _, _, _, _, st in ev_list:
-            total += 1
-            if st == "done":
-                done_c += 1
-            elif st == "missed":
-                missed_c += 1
-            else:
-                upcoming_c += 1
-    mn = cal_mod.month_name[month]
-    lines = [hdr(f"\U0001f4c5 {mn} {year}"), ""]
-    current_week = -1
-    for wi, (ws, we, evts) in enumerate(weeks):
-        ws_str = ws.strftime("%-d %b")
-        we_str = we.strftime("%-d %b")
-        count = len(evts)
-        marker = " \u25c2" if ws <= today <= we else ""
-        lines.append(f"W{wi+1}: {ws_str}\u2013{we_str} \u00b7 {count} reminder{'s' if count != 1 else ''}{marker}")
-        if ws <= today <= we:
-            current_week = wi
+    for wi, week in enumerate(weeks_raw):
+        ds = [d for d in week if d > 0]
+        if not ds: continue
+        w_start = datetime(year, month, ds[0]).date()
+        w_end = datetime(year, month, ds[-1]).date()
+        count = sum(1 for ev in all_events if w_start <= ev[0] <= w_end)
+        is_current = w_start <= today <= w_end
+        weeks.append((wi+1, w_start, w_end, count, is_current))
+    total = len(all_events)
+    done_c = sum(1 for e in all_events if e[3] == "done")
+    missed_c = sum(1 for e in all_events if e[3] == "missed")
+    upcoming = total - done_c - missed_c
+    mn = datetime(year, month, 1).strftime("%B %Y")
+    lines = [hdr(f"📅 {mn}"), ""]
+    for wi, (wn, ws, we, cnt, is_cur) in enumerate(weeks, 1):
+        cur_mark = " ◂" if is_cur else ""
+        lines.append(f"W{wi}: {ws.day}–{we.day} {ws.strftime('%b')}{cur_mark} · {cnt} reminder{'s' if cnt!=1 else ''}")
     lines.append("")
-    summary_parts = [f"Total: {total}"]
-    if done_c:
-        summary_parts.append(f"\u2705 {done_c} done")
-    if missed_c:
-        summary_parts.append(f"\u2717 {missed_c} missed")
-    if upcoming_c:
-        summary_parts.append(f"\u25cb {upcoming_c} upcoming")
-    lines.append(" \u00b7 ".join(summary_parts))
-    txt = "\n".join(lines)
+    parts = []
+    if done_c: parts.append(f"✅ {done_c} done")
+    if missed_c: parts.append(f"✗ {missed_c} missed")
+    if upcoming: parts.append(f"○ {upcoming} upcoming")
+    lines.append(f"Total: {total} · {' · '.join(parts)}" if parts else f"Total: {total}")
     btns = []
-    rb = []
-    for wi in range(len(weeks)):
-        rb.append(IKB(str(wi + 1), callback_data=f"mw_{year}_{month}_{wi}"))
-        if len(rb) == 4:
-            btns.append(rb)
-            rb = []
-    if rb:
-        btns.append(rb)
-    pm = month - 1 or 12
-    py = year if month > 1 else year - 1
-    nm = month % 12 + 1
-    ny = year if month < 12 else year + 1
-    btns.append([IKB(f"\u2039 {cal_mod.month_abbr[pm]}", callback_data=f"mn_{py}_{pm}"),
-                 IKB(f"{cal_mod.month_abbr[nm]} \u203a", callback_data=f"mn_{ny}_{nm}")])
-    btns.append([IKB("\u2715 Close", callback_data="pclose_month")])
-    return txt, IKM(btns)
+    row_btns = []
+    for wi, (wn, ws, we, cnt, is_cur) in enumerate(weeks, 1):
+        row_btns.append(IKB(str(wi), callback_data=f"mw_{year}_{month}_{wn}"))
+        if len(row_btns) == 4: btns.append(row_btns); row_btns = []
+    if row_btns: btns.append(row_btns)
+    pm = month - 1; py = year
+    if pm < 1: pm = 12; py -= 1
+    nm = month + 1; ny = year
+    if nm > 12: nm = 1; ny += 1
+    btns.append([IKB(f"‹ {datetime(py,pm,1).strftime('%b')}", callback_data=f"mn_{py}_{pm}"), IKB(f"{datetime(ny,nm,1).strftime('%b')} ›", callback_data=f"mn_{ny}_{nm}")])
+    btns.append([IKB("« Back", callback_data="home")])
+    return "\n".join(lines), IKM(btns)
 
-def _build_week(uid, year, month, week_idx, tz):
-    now = datetime.now(tz)
-    today = now.date()
-    first_day = datetime(year, month, 1).date()
-    _, ndays = cal_mod.monthrange(year, month)
-    last_day = datetime(year, month, ndays).date()
-    weeks = []
-    d = first_day
-    while d <= last_day:
-        ws = d
-        we = min(d + timedelta(days=6 - d.weekday()), last_day)
-        weeks.append((ws, we))
-        d = we + timedelta(days=1)
-    while len(weeks) < 4:
-        weeks.append((last_day, last_day))
-    if len(weeks) > 4:
-        ws3, _ = weeks[3]
-        weeks[3] = (ws3, last_day)
-        weeks = weeks[:4]
-    if week_idx >= len(weeks):
-        week_idx = len(weeks) - 1
-    ws, we = weeks[week_idx]
-    rows_data = sheet.get_all_values()
-    uid_s = str(uid)
-    reminders = []
-    for i, r in enumerate(rows_data[1:], start=2):
-        if not r or r[0] != uid_s:
-            continue
-        if len(r) > 7 and r[7]:
-            continue
-        msg, ds, ts, rep, st = get_detail(r)
-        if not ds:
-            continue
-        reminders.append((i, msg, ds, ts, rep, st))
-    events = _expand_for_range(reminders, ws, we, today)
-    events.sort(key=lambda e: (e[0], e[3] or ""))
-    mn = cal_mod.month_name[month]
-    ws_str = ws.strftime("%-d %b")
-    we_str = we.strftime("%-d %b")
-    lines = [hdr(f"W{week_idx+1}: {ws_str}\u2013{we_str}"), ""]
-    by_date = {}
-    recurring = []
-    for dt, msg, rep, ts, st in events:
-        if rep and rep != "none":
-            key = (msg, ts, rep)
-            found = False
-            for ri, (k, dates, s) in enumerate(recurring):
-                if k == key:
-                    recurring[ri] = (k, dates + [dt], s)
-                    found = True
-                    break
-            if not found:
-                recurring.append((key, [dt], st))
-        else:
-            by_date.setdefault(dt, []).append((msg, ts, st))
-    d = ws
-    while d <= we:
-        if d in by_date:
-            day_str = d.strftime("%-d %b, %a")
-            if d == today:
-                day_str = f"Today, {day_str}"
-            lines.append(f"<b>{day_str}</b>")
-            for msg, ts, st in by_date[d]:
-                ic = ST_IC.get(st, "\u25cb")
-                lines.append(f"  {ic} {msg} \u00b7 {fmt_time(ts)}")
-            lines.append("")
-        d += timedelta(days=1)
-    for (msg, ts, rep), dates, st in recurring:
-        if not dates:
-            continue
-        ic = ST_IC.get(st, "\u25cb")
-        day_names = [DAY_SHORT[d.weekday()] for d in sorted(set(dates))]
-        if len(day_names) == 5 and all(d in day_names for d in ["Mon","Tue","Wed","Thu","Fri"]):
-            day_label = "Mon\u2013Fri"
-        elif len(day_names) == 7:
-            day_label = "Daily"
-        else:
-            day_label = ", ".join(day_names)
+def build_week_view(uid, year, month, week_num, tz, total_weeks=4):
+    import calendar
+    now = datetime.now(tz); today = now.date()
+    cal_obj = calendar.Calendar(0)
+    weeks_raw = cal_obj.monthdayscalendar(year, month)
+    real_weeks = [w for w in weeks_raw if any(d > 0 for d in w)]
+    if week_num < 1 or week_num > len(real_weeks): return "Invalid week", IKM([[IKB("« Back", callback_data=f"mn_{year}_{month}")]])
+    week = real_weeks[week_num - 1]
+    ds = [d for d in week if d > 0]
+    w_start = datetime(year, month, ds[0]).date()
+    w_end = datetime(year, month, ds[-1]).date()
+    rows = sheet.get_all_values()
+    events = {}
+    for i, r in enumerate(rows[1:], start=2):
+        if str(r[0]) != str(uid): continue
+        if len(r) < 6: continue
+        if len(r) > 7 and r[7]: continue
+        m, d, t, rp = get_detail(r)
+        try: rd = datetime.strptime(d, "%Y-%m-%d").date()
+        except: continue
+        cur = w_start
+        while cur <= w_end:
+            should_add = False
+            if rp == "none" and cur == rd: should_add = True
+            elif rp == "daily" and cur >= rd: should_add = True
+            elif rp == "weekly" and cur >= rd and cur.weekday() == rd.weekday(): should_add = True
+            elif rp == "monthly" and cur >= rd and cur.day == rd.day: should_add = True
+            elif rp.startswith("custom:"):
+                cdays = rp.replace("custom:","").split(",")
+                if cur >= rd and DAYS[cur.weekday()] in cdays: should_add = True
+            if should_add:
+                s = r[5] if cur < today else ("done" if r[5] == "done" else "active")
+                events.setdefault(cur, []).append((t, m, s))
+            cur += timedelta(days=1)
+    mn = datetime(year, month, 1).strftime("%B %Y")
+    lines = [hdr(f"Week {week_num}: {w_start.day}–{w_end.day} {w_start.strftime('%b')}"), ""]
+    for d in range((w_end - w_start).days + 1):
+        dt = w_start + timedelta(days=d)
+        evts = events.get(dt, [])
+        if not evts: continue
+        day_label = "Today" if dt == today else f"{dt.day} {dt.strftime('%b')}, {dt.strftime('%a')}"
         lines.append(f"<b>{day_label}</b>")
-        lines.append(f"  {ic} {msg} \u00b7 {fmt_time(ts)}")
+        for t_val, m_val, s in sorted(evts):
+            ic = ST_IC.get(s, "○")
+            lines.append(f"  {ic} {fmt_time(t_val)} · {m_val}")
         lines.append("")
-    if len(lines) <= 3:
-        lines.append("No reminders this week.")
-    txt = "\n".join(lines)
+    if len(lines) <= 2: lines.append("<i>No reminders this week</i>")
     btns = []
-    if week_idx < 3:
-        btns.append([IKB(f"W{week_idx+2} \u203a", callback_data=f"mw_{year}_{month}_{week_idx+1}")])
-    if week_idx > 0:
-        btns.append([IKB(f"\u2039 W{week_idx}", callback_data=f"mw_{year}_{month}_{week_idx-1}")])
-    btns.append([IKB(f"\u00ab {mn} {year}", callback_data=f"mn_{year}_{month}")])
-    return txt, IKM(btns)
+    if week_num < len(real_weeks):
+        btns.append([IKB(f"Week {week_num+1} ›", callback_data=f"mw_{year}_{month}_{week_num+1}")])
+    btns.append([IKB(f"« {mn}", callback_data=f"mn_{year}_{month}")])
+    return "\n".join(lines), IKM(btns)
 
-def _expand_for_range(reminders, start_date, end_date, today):
-    events = []
-    for row, msg, ds, ts, rep, st in reminders:
-        try:
-            rd = datetime.strptime(ds, "%Y-%m-%d").date()
-        except:
-            continue
-        if rep in (None, "", "none"):
-            if start_date <= rd <= end_date:
-                events.append((rd, msg, rep, ts, st))
-        elif rep == "daily":
-            d = max(rd, start_date)
-            while d <= end_date:
-                est = st if d <= today else "active"
-                events.append((d, msg, rep, ts, est))
-                d += timedelta(days=1)
-        elif rep == "weekly":
-            d = rd
-            while d <= end_date:
-                if d >= start_date:
-                    est = st if d <= today else "active"
-                    events.append((d, msg, rep, ts, est))
-                d += timedelta(days=7)
-        elif rep == "monthly":
-            for m_off in range(13):
-                nm = rd.month + m_off
-                ny = rd.year + (nm - 1) // 12
-                nm = (nm - 1) % 12 + 1
-                try:
-                    d = rd.replace(year=ny, month=nm)
-                except:
-                    continue
-                if d > end_date:
-                    break
-                if d >= start_date:
-                    est = st if d <= today else "active"
-                    events.append((d, msg, rep, ts, est))
-        elif rep.startswith("custom:"):
-            cdays = rep.replace("custom:", "").split(",")
-            d = max(rd, start_date)
-            while d <= end_date:
-                if DAY_NAMES[d.weekday()] in cdays:
-                    est = st if d <= today else "active"
-                    events.append((d, msg, rep, ts, est))
-                d += timedelta(days=1)
-    return events
-
-# ============= REMIND (GROUP) =============
-def extract_tag_texts(msg):
-    if not msg.entities:
-        return []
-    tags = []
-    for e in msg.entities:
-        if e.type == "mention":
-            raw = msg.text[e.offset:e.offset + e.length]
-            uname = raw.lstrip("@").lower()
-            tags.append(uname)
-        elif e.type == "text_mention" and e.user:
-            tags.append(str(e.user.id))
-            if e.user.username:
-                tags.append(e.user.username.lower())
-    return tags
-
-async def remind_cmd(update, ctx):
-    if update.effective_chat.type == "private":
-        await update.message.reply_text("Use /add in private or just type naturally.")
+# ========== REMIND (GROUP) ==========
+async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    update_username(update.effective_user)
+    chat = update.effective_chat
+    if chat.type == "private":
+        await update.message.reply_text("Use /add here. /remind is for groups.")
         return
     uid = update.effective_user.id
-    gid = update.effective_chat.id
-    name = update.effective_user.first_name or "User"
-    uname = update.effective_user.username or ""
-    set_gsub(gid, uid, name, uname, True)
-    update_username(update.effective_user)
-    text = (update.message.text or "").strip()
-    cmd_part = text.split()[0] if text else ""
-    body = text[len(cmd_part):].strip() if len(text) > len(cmd_part) else ""
-    tags = extract_tag_texts(update.message)
-    if body:
-        tz = get_tz(uid)
-        parsed = parse_nl_partial(body, tz)
-        if parsed and parsed.get("message"):
-            ctx.user_data["g_chat"] = gid
-            ctx.user_data["g_creator"] = uid
-            ctx.user_data["g_creator_name"] = name
-            ctx.user_data["g_tags"] = tags
-            msg_text = parsed["message"]
-            date_val = parsed.get("date")
-            time_val = parsed.get("time")
-            rep_val = parsed.get("repeat")
-            ctx.user_data["message"] = msg_text
-            if date_val:
-                ctx.user_data["date"] = date_val
-            if time_val:
-                ctx.user_data["time"] = time_val
-            if rep_val:
-                ctx.user_data["repeat"] = rep_val
-            if date_val and time_val:
-                if is_past(date_val, time_val, tz):
-                    ctx.user_data["step"] = "g_date"
-                    now = datetime.now(tz)
-                    sent = await update.message.reply_text(
-                        f"{hdr('Group Reminder')}\n{msg_text}\n\n{past_msg(time_val)}",
-                        parse_mode="HTML",
-                        reply_markup=cal_kb(now.year, now.month, tz, "gcancel"))
-                    return
-                await _finish_group(update.message, ctx)
-                return
-            if date_val and not time_val:
-                ctx.user_data["step"] = "g_time"
-                sent = await update.message.reply_text(
-                    f"{hdr('Group Reminder')}\n{msg_text}\n{fmt_date(date_val)}\n\nEnter time:\ne.g. 9pm, 9:30 PM, 21:30",
-                    parse_mode="HTML", reply_markup=ForceReply(selective=True))
-                return
-            if time_val and not date_val:
-                tz2 = get_tz(uid)
-                now2 = datetime.now(tz2)
-                td = now2.strftime("%Y-%m-%d")
-                if not is_past(td, time_val, tz2):
-                    ctx.user_data["date"] = td
-                    await _finish_group(update.message, ctx)
-                    return
-                ctx.user_data["step"] = "g_date"
-                sent = await update.message.reply_text(
-                    f"{hdr('Group Reminder')}\n{msg_text}\n{fmt_time(time_val)}\n\n{past_msg(time_val)}",
-                    parse_mode="HTML",
-                    reply_markup=cal_kb(now2.year, now2.month, tz2, "gcancel"))
-                return
-            ctx.user_data["step"] = "g_date"
-            tz3 = get_tz(uid)
-            now3 = datetime.now(tz3)
-            sent = await update.message.reply_text(
-                f"{hdr('Group Reminder')}\n{msg_text}\n\nPick a date:",
-                parse_mode="HTML",
-                reply_markup=cal_kb(now3.year, now3.month, tz3, "gcancel"))
-            return
-    ctx.user_data["g_chat"] = gid
-    ctx.user_data["g_creator"] = uid
-    ctx.user_data["g_creator_name"] = name
-    ctx.user_data["g_tags"] = tags
-    ctx.user_data["step"] = "g_message"
-    await update.message.reply_text(
-        f"{hdr('Group Reminder')}\nEnter message:",
-        parse_mode="HTML",
-        reply_markup=ForceReply(selective=True))
-
-async def _finish_group(target, ctx):
+    uname = (update.effective_user.username or "").lower()
+    fname = update.effective_user.first_name or ""
+    set_gsub(chat.id, uid, fname, uname)
     ud = ctx.user_data
-    msg = ud.get("message", "")
-    ds = ud.get("date", "")
-    ts = ud.get("time", "")
-    rep = ud.get("repeat", "none")
-    gid = ud.get("g_chat")
-    creator = ud.get("g_creator")
-    creator_name = ud.get("g_creator_name", "")
-    tags = ud.get("g_tags", [])
-    tid = f"t_{int(datetime.now().timestamp())}"
-    sheet.append_row([str(creator), msg, ds, ts, rep, "active", 0, str(gid), tid], value_input_option="RAW")
-    subs = get_gsubs(gid)
-    if tags:
-        for sub_uid, sub_name, sub_uname in subs:
-            matched = False
-            for tag in tags:
-                if tag == sub_uid or (sub_uname and tag == sub_uname.lower()) or tag == sub_name.lower():
-                    matched = True
-                    break
-            if matched:
-                add_tmember(tid, sub_uid, sub_name, "waiting")
+    text = (update.message.text or "").strip()
+    after = text[len("/remind"):].strip() if text.lower().startswith("/remind") else ""
+    tags = extract_tag_texts(update.message)
+    if tags: ud["g_tags"] = tags
+    else: ud.pop("g_tags", None)
+    if after:
+        for tag in tags:
+            after = re.sub(rf'@{re.escape(tag)}', '', after, flags=re.I).strip()
+        tz = get_tz(uid)
+        parsed = parse_nl_partial(after, tz)
+        if parsed:
+            ud["g_chat"] = chat.id; ud["g_creator"] = uid; ud["g_fname"] = fname
+            ud["message"] = parsed["message"]
+            if parsed.get("date"): ud["date"] = parsed["date"]
+            if parsed.get("time"): ud["time"] = parsed["time"]
+            if parsed.get("repeat"): ud["g_repeat"] = parsed["repeat"]
+            if parsed.get("date") and parsed.get("time"):
+                if is_past(parsed["date"], parsed["time"], tz):
+                    ud["step"] = "g_date"; ud["message"] = parsed["message"]
+                    if parsed.get("time"): ud["time"] = parsed["time"]
+                    msg = await update.message.reply_text(f"{parsed['message']}\n{past_msg(parsed['time'])}\n\nPick a date:", reply_markup=cal_kb(datetime.now(tz).year, datetime.now(tz).month, tz, "gcancel", "✕ Cancel"), parse_mode="HTML")
+                    return
+                await finish_group_remind(update, ctx)
+                return
+            elif parsed.get("time"):
+                ud["step"] = "g_date"
+                now = datetime.now(tz)
+                msg = await update.message.reply_text(f"{parsed['message']}\n{fmt_time(parsed['time'])}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz, "gcancel", "✕ Cancel"), parse_mode="HTML")
+                return
+            elif parsed.get("date"):
+                ud["step"] = "g_time"
+                msg = await update.message.reply_text(f"{parsed['message']}\n{fmt_date(parsed['date'])}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", reply_markup=ForceReply(selective=True), parse_mode="HTML")
+                return
             else:
-                add_tmember(tid, sub_uid, sub_name, "skipped")
-    else:
-        for sub_uid, sub_name, _ in subs:
-            add_tmember(tid, sub_uid, sub_name, "waiting")
-    members = get_tmembers(tid)
-    active = [(u, n, s) for u, n, s in members if s != "skipped"]
-    if tags and active:
-        names = ", ".join(n for _, n, _ in active)
-        sub_line = f"For: {names}"
-    else:
-        sub_line = f"{len(active)} subscribed" + (f": {', '.join(n for _,n,_ in active)}" if active else "")
-    txt = (f"{hdr('Group Reminder')}\n"
-           f"{detail(msg, ds, ts, rep)}\n"
-           f"By {creator_name}\n\n{sub_line}")
-    btns = [[IKB("\uff0b Count Me In", callback_data=f"gjoin_{tid}"),
-             IKB("\u2715 Skip", callback_data=f"gskip_{tid}")]]
-    if rep == "none":
-        btns.append([IKB("\U0001f501 Repeat", callback_data=f"grep_{tid}")])
-    if hasattr(target, "reply_text"):
-        await target.reply_text(txt, parse_mode="HTML", reply_markup=IKM(btns))
-    else:
-        await safe_edit(target, txt, IKM(btns))
-    ud.clear()
+                ud["step"] = "g_date"
+                now = datetime.now(tz)
+                msg = await update.message.reply_text(f"{parsed['message']}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz, "gcancel", "✕ Cancel"), parse_mode="HTML")
+                return
+    ud["step"] = "g_message"; ud["g_chat"] = chat.id; ud["g_creator"] = uid; ud["g_fname"] = fname
+    await update.message.reply_text(f"{hdr('Group Reminder')}\nEnter message:", reply_markup=ForceReply(selective=True), parse_mode="HTML")
 
-# ============= BUTTON HANDLER =============
-async def on_btn(update, ctx):
+async def finish_group_remind(update, ctx):
+    ud = ctx.user_data
+    msg = ud.get("message","?"); date = ud.get("date"); time = ud.get("time")
+    rep = ud.get("g_repeat","none"); gid = ud.get("g_chat"); creator = ud.get("g_creator")
+    fname = ud.get("g_fname","")
+    tags = ud.get("g_tags")
+    tid = f"t_{int(_time.time())}"
+    sheet.append_row([str(creator), msg, date, time, rep, "active", 0, str(gid), tid], value_input_option="RAW")
+    subs = get_gsubs(gid)
+    sub_count = 0
+    if tags:
+        for s_uid, s_name, s_uname in subs:
+            if is_subscriber_tagged(s_uid, s_name, s_uname, tags):
+                add_tmember(tid, s_uid, s_name, "waiting"); sub_count += 1
+            else:
+                add_tmember(tid, s_uid, s_name, "skipped")
+        tagged_names = []
+        for s_uid, s_name, s_uname in subs:
+            if is_subscriber_tagged(s_uid, s_name, s_uname, tags): tagged_names.append(s_name)
+        for_text = f"\nFor: {', '.join(tagged_names)}" if tagged_names else ""
+    else:
+        for s_uid, s_name, _ in subs:
+            add_tmember(tid, s_uid, s_name, "waiting"); sub_count += 1
+        for_text = ""
+    text = f"{detail(msg, date, time, rep)}\nBy {fname}{for_text}\n\n{sub_count} subscribed"
+    kb = IKM([[IKB("＋ Count Me In", callback_data=f"gjoin_{tid}"), IKB("✕ Skip", callback_data=f"gskip_{tid}")],
+              [IKB("🔁 Repeat", callback_data=f"grep_{tid}")]])
+    target = update.effective_message or update.callback_query.message
+    sent = await target.reply_text(text, reply_markup=kb, parse_mode="HTML")
+    ctx.bot_data[f"gsetup_{tid}"] = {"mid": sent.message_id, "cid": gid}
+    for k in ["step","message","date","time","g_repeat","g_chat","g_creator","g_fname","g_tags"]:
+        ud.pop(k, None)
+
+# ========== SAVE REMINDER (PRIVATE) ==========
+async def save_reminder(update, ctx, msg, date, time, rep="none", edit_msg=None):
+    uid = update.effective_user.id
+    sheet.append_row([str(uid), msg, date, time, rep, "active", 0, "", ""], value_input_option="RAW")
+    rows = sheet.get_all_values()
+    row = len(rows)
+    text = f"{hdr('Saved ✓')}\n{detail(msg, date, time, rep)}"
+    btns = []
+    if rep == "none": btns.append([IKB("🔁 Repeat", callback_data=f"chrep_{row}_show")])
+    btns.append([IKB("✎ Edit", callback_data=f"edit_{row}")])
+    btns.append([IKB("＋ New", callback_data="add")])
+    kb = IKM(btns)
+    if edit_msg:
+        await safe_edit(edit_msg, text, kb)
+    else:
+        target = update.effective_message or update.callback_query.message
+        await target.reply_text(text, reply_markup=kb, parse_mode="HTML")
+
+# ========== TEXT HANDLER ==========
+async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    update_username(update.effective_user)
+    ud = ctx.user_data; text = update.message.text.strip()
+    uid = update.effective_user.id; tz = get_tz(uid)
+    chat = update.effective_chat
+    step = ud.get("step")
+    # GROUP TEXT STEPS
+    if step in ("g_message","g_time") and chat.type != "private":
+        if str(chat.id) != str(ud.get("g_chat")): return
+        if step == "g_message":
+            parsed = parse_nl_partial(text, tz)
+            if parsed:
+                ud["message"] = parsed["message"]
+                if parsed.get("time"): ud["time"] = parsed["time"]
+                if parsed.get("date"): ud["date"] = parsed["date"]
+                if parsed.get("repeat"): ud["g_repeat"] = parsed["repeat"]
+                if parsed.get("date") and parsed.get("time"):
+                    if is_past(parsed["date"], parsed["time"], tz):
+                        ud["step"] = "g_date"
+                        now = datetime.now(tz)
+                        await update.message.reply_text(past_msg(parsed["time"]) + "\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz, "gcancel", "✕ Cancel"), parse_mode="HTML")
+                        return
+                    await finish_group_remind(update, ctx)
+                    return
+                elif parsed.get("time"):
+                    ud["step"] = "g_date"
+                    now = datetime.now(tz)
+                    await update.message.reply_text(f"{parsed['message']}\n{fmt_time(parsed['time'])}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz, "gcancel", "✕ Cancel"), parse_mode="HTML")
+                    return
+                elif parsed.get("date"):
+                    ud["step"] = "g_time"
+                    await update.message.reply_text(f"{parsed['message']}\n{fmt_date(parsed['date'])}\n\nEnter time:", reply_markup=ForceReply(selective=True), parse_mode="HTML")
+                    return
+            ud["message"] = text; ud["step"] = "g_date"
+            now = datetime.now(tz)
+            await update.message.reply_text(f"{text}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz, "gcancel", "✕ Cancel"), parse_mode="HTML")
+            return
+        elif step == "g_time":
+            t = parse_time(text)
+            if not t:
+                await update.message.reply_text("⚠ Invalid time.\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", reply_markup=ForceReply(selective=True), parse_mode="HTML")
+                return
+            d = ud.get("date")
+            if d and is_past(d, t, tz):
+                await update.message.reply_text(past_msg(t), reply_markup=ForceReply(selective=True), parse_mode="HTML")
+                return
+            ud["time"] = t
+            if not d:
+                now = datetime.now(tz)
+                ud["date"] = now.strftime("%Y-%m-%d")
+            await finish_group_remind(update, ctx)
+            return
+    # PRIVATE STEPS
+    if step == "message":
+        await del_prompt(ctx, ud)
+        parsed = parse_nl_partial(text, tz)
+        if parsed:
+            ud["message"] = parsed["message"]
+            if parsed.get("time"): ud["time"] = parsed["time"]
+            if parsed.get("date"): ud["date"] = parsed["date"]
+            if parsed.get("repeat"): ud["p_repeat"] = parsed["repeat"]
+            if parsed.get("date") and parsed.get("time"):
+                if is_past(parsed["date"], parsed["time"], tz):
+                    ud["step"] = "date"
+                    now = datetime.now(tz)
+                    msg = await update.message.reply_text(f"{parsed['message']}\n{past_msg(parsed['time'])}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz), parse_mode="HTML")
+                    store_prompt(ud, msg)
+                    return
+                rep = parsed.get("repeat") or "none"
+                await save_reminder(update, ctx, parsed["message"], parsed["date"], parsed["time"], rep)
+                ud.clear()
+                return
+            elif parsed.get("time"):
+                ud["step"] = "date"
+                now = datetime.now(tz)
+                msg = await update.message.reply_text(f"{parsed['message']}\n{fmt_time(parsed['time'])}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz), parse_mode="HTML")
+                store_prompt(ud, msg)
+                return
+            elif parsed.get("date"):
+                ud["step"] = "time"
+                msg = await update.message.reply_text(f"{parsed['message']}\n{fmt_date(parsed['date'])}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", reply_markup=IKM([[IKB("✕ Cancel", callback_data="cancel")]]), parse_mode="HTML")
+                store_prompt(ud, msg)
+                return
+        ud["message"] = text; ud["step"] = "date"
+        now = datetime.now(tz)
+        msg = await update.message.reply_text(f"{text}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz), parse_mode="HTML")
+        store_prompt(ud, msg)
+        return
+    elif step == "time":
+        t = parse_time(text)
+        if not t:
+            await update.message.reply_text("⚠ Invalid time.\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", parse_mode="HTML")
+            return
+        d = ud.get("date")
+        if d and is_past(d, t, tz):
+            await update.message.reply_text(past_msg(t), parse_mode="HTML")
+            return
+        await del_prompt(ctx, ud)
+        if not d:
+            now = datetime.now(tz); d = now.strftime("%Y-%m-%d")
+            ud["date"] = d
+        ud["time"] = t
+        rep = ud.get("p_repeat", "none")
+        await save_reminder(update, ctx, ud["message"], d, t, rep)
+        ud.clear()
+        return
+    elif step == "edit_msg":
+        row = ud.get("editing_row")
+        if row:
+            sheet.update_cell(row, 2, text)
+            r, m, d, t, rp = row_detail(row)
+            await update.message.reply_text(f"{hdr('Updated ✓')}\n{detail(text, d, t, rp)}", reply_markup=IKM([[IKB("« Back", callback_data=f"view_{row}")]]), parse_mode="HTML")
+        ud.pop("step", None); ud.pop("editing_row", None)
+        return
+    elif step == "edit_time":
+        row = ud.get("editing_row")
+        t = parse_time(text)
+        if not t:
+            await update.message.reply_text("⚠ Invalid time.\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", parse_mode="HTML")
+            return
+        if row:
+            r = sheet.row_values(row)
+            d = norm_date(r[2]) if len(r) > 2 else ""
+            if d and is_past(d, t, tz):
+                await update.message.reply_text(past_msg(t), parse_mode="HTML")
+                return
+            sheet.update_cell(row, 4, t)
+            r, m, dd, tt, rp = row_detail(row)
+            await update.message.reply_text(f"{hdr('Updated ✓')}\n{detail(m, dd, t, rp)}", reply_markup=IKM([[IKB("« Back", callback_data=f"view_{row}")]]), parse_mode="HTML")
+        ud.pop("step", None); ud.pop("editing_row", None)
+        return
+    elif step == "cfg_dtime":
+        t = parse_time(text)
+        if not t:
+            await update.message.reply_text("⚠ Invalid time.\n<i>e.g. 7am, 8:30 PM</i>", parse_mode="HTML")
+            return
+        save_cfg(uid, "digest_time", t)
+        await show_settings(update.message, uid, new=True)
+        ud.pop("step", None)
+        return
+    # NL PARSING (no active step)
+    if step: return
+    if chat.type != "private": return
+    parsed = parse_nl_partial(text, tz)
+    if not parsed: return
+    ud["message"] = parsed["message"]
+    if parsed.get("repeat"): ud["p_repeat"] = parsed["repeat"]
+    if parsed.get("date") and parsed.get("time"):
+        if is_past(parsed["date"], parsed["time"], tz):
+            ud["step"] = "date"; ud["date"] = parsed["date"]; ud["time"] = parsed["time"]
+            now = datetime.now(tz)
+            msg = await update.message.reply_text(f"{parsed['message']}\n{past_msg(parsed['time'])}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz), parse_mode="HTML")
+            store_prompt(ud, msg)
+            return
+        rep = parsed.get("repeat") or "none"
+        await save_reminder(update, ctx, parsed["message"], parsed["date"], parsed["time"], rep)
+        return
+    elif parsed.get("time"):
+        ud["time"] = parsed["time"]; ud["step"] = "date"
+        now = datetime.now(tz)
+        ud["date_for_today"] = now.strftime("%Y-%m-%d")
+        if not is_past(now.strftime("%Y-%m-%d"), parsed["time"], tz):
+            rep = parsed.get("repeat") or "none"
+            await save_reminder(update, ctx, parsed["message"], now.strftime("%Y-%m-%d"), parsed["time"], rep)
+            return
+        msg = await update.message.reply_text(f"{parsed['message']}\n{past_msg(parsed['time'])}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz), parse_mode="HTML")
+        store_prompt(ud, msg)
+        return
+    elif parsed.get("date"):
+        ud["date"] = parsed["date"]; ud["step"] = "time"
+        msg = await update.message.reply_text(f"{parsed['message']}\n{fmt_date(parsed['date'])}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", reply_markup=IKM([[IKB("✕ Cancel", callback_data="cancel")]]), parse_mode="HTML")
+        store_prompt(ud, msg)
+        return
+    else:
+        ud["step"] = "date"
+        now = datetime.now(tz)
+        msg = await update.message.reply_text(f"{parsed['message']}\n\nPick a date:", reply_markup=cal_kb(now.year, now.month, tz), parse_mode="HTML")
+        store_prompt(ud, msg)
+        return
+
+# ========== BUTTON HANDLER ==========
+async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    d = q.data
-    uid = q.from_user.id
+    d = q.data; ud = ctx.user_data; uid = q.from_user.id
     update_username(q.from_user)
-    if d == "noop":
-        return
+    if d == "noop": return
     # HOME
+    if d == "home":
+        await rm_home(ctx, ud)
+        ud.clear()
+        msg = await q.message.reply_text(f"{hdr('Smart Reminder Bot')}\n\n{home_text()}", reply_markup=home_kb(), parse_mode="HTML")
+        store_home(ud, msg)
+        return
+    # ADD
     if d == "add":
-        ctx.user_data.clear()
-        ctx.user_data["step"] = "message"
-        sent = await q.message.reply_text(f"{hdr('New Reminder')}\nEnter message:", parse_mode="HTML", reply_markup=cancel_kb())
-        store_prompt(ctx.user_data, sent)
+        await rm_home(ctx, ud)
+        ud.clear(); ud["step"] = "message"
+        msg = await q.message.reply_text(f"{hdr('New Reminder')}\nEnter message:", reply_markup=IKM([[IKB("✕ Cancel", callback_data="cancel")]]), parse_mode="HTML")
+        store_prompt(ud, msg)
         return
-    if d == "back_home":
-        await rm_old_home(ctx.user_data, ctx.bot)
-        sent = await q.message.reply_text(f"{hdr('Smart Reminder Bot')}\n\n{HOME_TEXT}", parse_mode="HTML", reply_markup=home_kb())
-        ctx.user_data["h_mid"] = sent.message_id
-        ctx.user_data["h_cid"] = sent.chat_id
-        return
+    # CANCEL
     if d == "cancel":
-        ctx.user_data.clear()
-        await safe_edit(q.message, f"{hdr('Cancelled')}", home_kb())
+        ud.clear()
+        msg = await q.message.reply_text(f"{hdr('Smart Reminder Bot')}\n\n{home_text()}", reply_markup=home_kb(), parse_mode="HTML")
+        store_home(ud, msg)
         return
+    # GROUP CANCEL
     if d == "gcancel":
-        ctx.user_data.clear()
-        try:
-            await q.message.delete()
-        except:
-            pass
+        ud.clear()
+        try: await q.message.delete()
+        except: pass
         return
-    # PRIVATE CLOSE/SHOW
-    if d == "pclose_list":
-        await safe_edit(q.message, "\U0001f4cb Reminders", IKM([[IKB("\U0001f4cb Show", callback_data=f"pshow_list_{q.message.message_id}")]]))
-        return
+    # PRIVATE CLOSE (info)
     if d == "pclose_info":
-        await safe_edit(q.message, "\u2139\ufe0f Info", IKM([[IKB("\U0001f4cb Show", callback_data=f"pshow_info_{q.message.message_id}")]]))
+        mid = q.message.message_id
+        text = ctx.bot_data.get(f"pinfo_{mid}", "<b>ℹ️ Info</b>")
+        await safe_edit(q.message, "<b>ℹ️ Info</b>", IKM([[IKB("📋 Show", callback_data=f"pshow_info_{mid}")]]))
         return
-    if d == "pclose_month":
-        tz = get_tz(uid)
-        now = datetime.now(tz)
-        mn = cal_mod.month_name[now.month]
-        await safe_edit(q.message, f"\U0001f4c5 {mn} {now.year}",
-            IKM([[IKB("\U0001f4cb Show", callback_data=f"pshow_month_{now.year}_{now.month}_{q.message.message_id}")]]))
-        return
-    if d.startswith("pshow_list_"):
-        await _private_list(q, ctx, new=False)
-        return
+    # PRIVATE SHOW INFO
     if d.startswith("pshow_info_"):
-        txt = ctx.bot_data.get(f"pinfo_{d.replace('pshow_info_', '')}", "")
-        if not txt:
-            txt = "Use /info to see details."
-        await safe_edit(q.message, txt, IKM([[IKB("\u2715 Close", callback_data="pclose_info")], [IKB("\uff0b New", callback_data="add")]]))
+        mid = int(d.replace("pshow_info_", ""))
+        text = ctx.bot_data.get(f"pinfo_{mid}")
+        if text:
+            await safe_edit(q.message, text, IKM([[IKB("✕ Close", callback_data="pclose_info")], [IKB("＋ New", callback_data="add")]]))
         return
+    # PRIVATE SHOW LIST
+    if d == "pshow_list":
+        await show_list(update, ctx, new=False)
+        return
+    # PRIVATE SHOW MONTH
     if d.startswith("pshow_month_"):
         parts = d.replace("pshow_month_", "").split("_")
-        if len(parts) >= 2:
-            y, m = int(parts[0]), int(parts[1])
-            tz = get_tz(uid)
-            txt, kb = _build_month(uid, y, m, tz)
-            await safe_edit(q.message, txt, kb)
+        y, m = int(parts[0]), int(parts[1])
+        tz = get_tz(uid)
+        text, kb = build_month_view(uid, y, m, tz)
+        await safe_edit(q.message, text, kb)
         return
     # GROUP CLOSE/SHOW
     if d == "gclose":
         mid = q.message.message_id
-        gdata = ctx.bot_data.get(f"gmin_{mid}")
-        if gdata:
-            await safe_edit(q.message, gdata.get("min_text", "Smart Reminder Bot"),
-                IKM([[IKB("\U0001f4cb Show", callback_data=gdata.get("show_cb", "noop"))]]))
+        gmin = ctx.bot_data.get(f"gmin_{mid}")
+        if gmin:
+            await safe_edit(q.message, gmin["text"], IKM([[IKB("📋 Show", callback_data=gmin["show_cb"])]]))
         else:
-            await safe_edit(q.message, "Smart Reminder Bot",
-                IKM([[IKB("\U0001f4cb Show", callback_data="noop")]]))
+            await safe_edit(q.message, "<b>📋</b>", IKM([[IKB("📋 Show", callback_data="noop")]]))
         return
     if d.startswith("gshow_start_"):
-        mid = d.replace("gshow_start_", "")
-        gdata = ctx.bot_data.get(f"gmin_{mid}")
-        if gdata:
-            await safe_edit(q.message, gdata["text"], IKM([[IKB("\u2715 Close", callback_data="gclose")]]))
+        mid = int(d.replace("gshow_start_", ""))
+        text = ctx.bot_data.get(f"gfull_{mid}")
+        if text:
+            await safe_edit(q.message, text, IKM([[IKB("✕ Close", callback_data="gclose")]]))
         return
     if d.startswith("gshow_list_"):
         parts = d.replace("gshow_list_", "").split("_")
-        if len(parts) >= 2:
-            gid = int(parts[0])
-            rows = sheet.get_all_values()
-            gid_s = str(gid)
-            items = []
-            for i, r in enumerate(rows[1:], start=2):
-                if len(r) <= 7 or r[7] != gid_s:
-                    continue
-                st = r[5] if len(r) > 5 else ""
-                if st in ("active", "pending", "snoozed"):
-                    msg, ds, ts, rep, _ = get_detail(r)
-                    items.append((i, msg, ds, ts, rep, st))
-            if not items:
-                await safe_edit(q.message, f"{hdr('Group Reminders')}\n\nNo active reminders.",
-                    IKM([[IKB("\u2715 Close", callback_data="gclose")]]))
-                return
-            lines = [hdr("Group Reminders"), ""]
-            for idx, (row, msg, ds, ts, rep, st) in enumerate(items):
-                short = msg[:25] + "\u2026" if len(msg) > 25 else msg
-                lines.append(f"{idx+1} {ST_IC.get(st, chr(9675))} {short}\n   {fmt_date(ds)} \u00b7 {fmt_time(ts)}")
-            btns = []
-            rb = []
-            for idx, (row, *_) in enumerate(items):
-                rb.append(IKB(str(idx+1), callback_data=f"gview_{row}"))
-                if len(rb) == 5:
-                    btns.append(rb)
-                    rb = []
-            if rb:
-                btns.append(rb)
-            btns.append([IKB("\u2715 Close", callback_data="gclose")])
-            await safe_edit(q.message, "\n".join(lines), IKM(btns))
+        gid = parts[0]
+        mid = int(parts[1]) if len(parts) > 1 else 0
+        text = ctx.bot_data.get(f"gfull_{mid}")
+        if text:
+            await safe_edit(q.message, text, IKM([[IKB("✕ Close", callback_data="gclose")]]))
         return
     # CALENDAR
+    if await _btn_calendar(q, ctx, d, ud, uid): return
+    # REMINDER ACTIONS
+    if await _btn_reminder(q, ctx, d, ud, uid): return
+    # EDIT
+    if await _btn_edit(q, ctx, d, ud, uid): return
+    # SETTINGS
+    if await _btn_settings(q, ctx, d, ud, uid): return
+    # GROUP ACTIONS
+    if await _btn_group(q, ctx, d, ud, uid): return
+    # MONTH
+    if await _btn_month(q, ctx, d, ud, uid): return
+
+async def _btn_calendar(q, ctx, d, ud, uid):
     if d.startswith("cal_"):
-        parts = d.replace("cal_", "").split("_")
+        parts = d.replace("cal_","").split("-")
         y, m = int(parts[0]), int(parts[1])
         tz = get_tz(uid)
-        step = ctx.user_data.get("step", "")
-        back_cb = "gcancel" if step.startswith("g_") else ("cancel" if step != "edit_date" else f"edit_{ctx.user_data.get('editing_row', '')}")
-        back_txt = "\u2715 Cancel" if step != "edit_date" else "\u00ab Back"
-        await safe_edit(q.message, q.message.text, cal_kb(y, m, tz, back_cb, back_txt))
-        return
-    if d.startswith("day_"):
-        ds = d.replace("day_", "")
-        step = ctx.user_data.get("step", "")
-        tz = get_tz(uid)
+        step = ud.get("step","")
         if step == "edit_date":
-            row = ctx.user_data.get("editing_row")
-            if row:
-                ts_existing = ctx.user_data.get("edit_old_time", "")
-                if is_past(ds, ts_existing, tz):
-                    now = datetime.now(tz)
-                    await safe_edit(q.message, f"{past_msg(ts_existing)}\nChange the time first or pick a future date.",
-                        cal_kb(now.year, now.month, tz, f"edit_{row}", "\u00ab Back"))
-                    return
-                sheet.update_cell(row, 3, ds)
-                r = sheet.row_values(row)
-                msg, _, ts, rep, st = get_detail(r)
-                await safe_edit(q.message, f"{hdr('Updated \u2713')}\n{detail(msg, ds, ts, rep)}", home_kb())
-            ctx.user_data.clear()
-            return
-        if step in ("g_date", "date"):
-            ctx.user_data["date"] = ds
-            ts = ctx.user_data.get("time")
-            if ts:
-                if is_past(ds, ts, tz):
-                    now = datetime.now(tz)
-                    msg_text = ctx.user_data.get("message", "")
-                    bcb = "gcancel" if step == "g_date" else "cancel"
-                    await safe_edit(q.message, f"{msg_text}\n\n{past_msg(ts)}",
-                        cal_kb(now.year, now.month, tz, bcb))
-                    return
-                if step == "g_date":
-                    await _finish_group(q.message, ctx)
-                else:
-                    await _save_reminder(q.message, ctx)
-                return
-            ctx.user_data["step"] = "g_time" if step == "g_date" else "time"
-            msg_text = ctx.user_data.get("message", "")
-            if step == "g_date":
-                await safe_edit(q.message, f"{hdr('Group Reminder')}\n{msg_text}\n{fmt_date(ds)}\n\nEnter time:\ne.g. 9pm, 9:30 PM, 21:30",
-                    IKM([[IKB("\u2715 Cancel", callback_data="gcancel")]]))
-            else:
-                sent = await q.message.reply_text(f"{msg_text}\n{fmt_date(ds)}\n\nEnter time:\ne.g. 9pm, 9:30 PM, 21:30", parse_mode="HTML")
-                store_prompt(ctx.user_data, sent)
-            return
-        return
-    # REPEAT
-    if d.startswith("rep_"):
-        val = d.replace("rep_", "")
-        if val == "back":
-            return
-        if val == "custom":
-            ctx.user_data["custom_days"] = []
-            await safe_edit(q.message, f"{hdr('Select Days')}\nPick days for reminder:",
-                IKM(custom_days_kb([], None)))
-            return
-        ctx.user_data["repeat"] = val
-        step = ctx.user_data.get("step", "")
-        if step == "g_repeat":
-            await _finish_group(q.message, ctx)
+            row = ud.get("editing_row")
+            await safe_edit(q.message, q.message.text, cal_kb(y, m, tz, f"view_{row}", "« Back"))
+        elif step == "g_date":
+            await safe_edit(q.message, q.message.text, cal_kb(y, m, tz, "gcancel", "✕ Cancel"))
         else:
-            await _save_reminder(q.message, ctx)
-        return
-    if d.startswith("cday__"):
-        val = d.replace("cday__", "")
-        sel = ctx.user_data.get("custom_days", [])
-        if val == "mf":
-            sel = ["mon", "tue", "wed", "thu", "fri"]
-        elif val == "all":
-            sel = list(DAY_NAMES)
-        elif val == "clr":
-            sel = []
-        elif val in sel:
-            sel.remove(val)
-        else:
-            sel.append(val)
-        ctx.user_data["custom_days"] = sel
-        await safe_edit(q.message, f"{hdr('Select Days')}\nPick days for reminder:",
-            IKM(custom_days_kb(sel, None)))
-        return
-    if d == "csave_":
-        sel = ctx.user_data.get("custom_days", [])
-        if sel:
-            ordered = [dn for dn in DAY_NAMES if dn in sel]
-            ctx.user_data["repeat"] = "custom:" + ",".join(ordered)
-            step = ctx.user_data.get("step", "")
-            if step == "g_repeat":
-                await _finish_group(q.message, ctx)
-            else:
-                await _save_reminder(q.message, ctx)
-        return
-    # CHANGE REPEAT (after save)
-    if d.startswith("chrep_"):
-        parts = d.replace("chrep_", "").split("_", 1)
-        row = int(parts[0])
-        val = parts[1] if len(parts) > 1 else ""
-        if val == "back":
-            ctx.user_data.pop("custom_days", None)
-            r = sheet.row_values(row)
-            msg, ds, ts, rep, st = get_detail(r)
-            await safe_edit(q.message, f"{hdr('Saved \u2713')}\n{detail(msg, ds, ts, rep)}",
-                IKM([[IKB("\U0001f501 Repeat", callback_data=f"grep_{row}"),
-                      IKB("\u270e Edit", callback_data=f"edit_{row}"),
-                      IKB("\uff0b New", callback_data="add")]]))
-            return
-        if val == "custom":
-            ctx.user_data["custom_days"] = []
-            ctx.user_data["chrep_row"] = row
-            await safe_edit(q.message, f"{hdr('Select Days')}\nPick days for reminder:",
-                IKM(custom_days_kb([], row)))
-            return
-        sheet.update_cell(row, 5, val)
-        r = sheet.row_values(row)
-        msg, ds, ts, rep, st = get_detail(r)
-        await safe_edit(q.message, f"{hdr('Updated \u2713')}\n{detail(msg, ds, ts, rep)}", home_kb())
-        return
-    if d.startswith("cday_") and not d.startswith("cday__"):
-        parts = d.replace("cday_", "").split("_", 1)
-        row = int(parts[0]) if parts[0] else None
-        val = parts[1] if len(parts) > 1 else ""
-        sel = ctx.user_data.get("custom_days", [])
-        if val == "mf":
-            sel = ["mon", "tue", "wed", "thu", "fri"]
-        elif val == "all":
-            sel = list(DAY_NAMES)
-        elif val == "clr":
-            sel = []
-        elif val in sel:
-            sel.remove(val)
-        else:
-            sel.append(val)
-        ctx.user_data["custom_days"] = sel
-        await safe_edit(q.message, f"{hdr('Select Days')}\nPick days for reminder:",
-            IKM(custom_days_kb(sel, row)))
-        return
-    if d.startswith("csave_") and d != "csave_":
-        row = int(d.replace("csave_", ""))
-        sel = ctx.user_data.get("custom_days", [])
-        if sel:
-            ordered = [dn for dn in DAY_NAMES if dn in sel]
-            rep_val = "custom:" + ",".join(ordered)
-            sheet.update_cell(row, 5, rep_val)
-            r = sheet.row_values(row)
-            msg, ds, ts, rep, st = get_detail(r)
-            await safe_edit(q.message, f"{hdr('Updated \u2713')}\n{detail(msg, ds, ts, rep)}", home_kb())
-        ctx.user_data.pop("custom_days", None)
-        return
-    if d.startswith("grep_"):
-        val = d.replace("grep_", "")
-        try:
-            row = int(val)
-            r = sheet.row_values(row)
-            msg, ds, ts, rep, st = get_detail(r)
-            await safe_edit(q.message, f"{detail(msg, ds, ts, None)}\n\nRepeat?", repeat_kb(row))
-        except:
-            pass
-        return
-    # SNOOZE
-    if d.startswith("snzp_"):
-        row = int(d.replace("snzp_", ""))
-        r = sheet.row_values(row)
-        if len(r) > 5 and r[5] not in ("pending", "snoozed"):
-            await safe_edit(q.message, f"{hdr('Already handled')}", home_kb())
-            return
-        await safe_edit(q.message, q.message.text, snz_kb(row))
-        return
-    if d.startswith("snzb_"):
-        row = int(d.replace("snzb_", ""))
-        await safe_edit(q.message, q.message.text, reminder_kb(row))
-        return
-    if d.startswith("snz_"):
-        parts = d.replace("snz_", "").split("_")
-        row, mins = int(parts[0]), int(parts[1])
-        r = sheet.row_values(row)
-        if len(r) > 5 and r[5] not in ("pending", "snoozed"):
-            await safe_edit(q.message, f"{hdr('Already handled')}", home_kb())
-            return
-        cancel_jobs(ctx, f"retry-{row}")
+            await safe_edit(q.message, q.message.text, cal_kb(y, m, tz))
+        return True
+    if d.startswith("day_"):
+        ds = d.replace("day_","")
         tz = get_tz(uid)
-        now = datetime.now(tz)
-        snz_time = now + timedelta(minutes=mins)
-        msg, ds, ts, rep, st = get_detail(r)
-        gid = r[7] if len(r) > 7 else ""
-        tid = r[8] if len(r) > 8 else ""
-        if rep and rep != "none" and not gid:
-            sheet.update_cell(row, 6, "snoozed")
-            sheet.update_cell(row, 7, 0)
-            ctx.job_queue.run_once(snooze_fire, mins * 60,
-                data={"row": row, "chat": uid, "uid": uid}, name=f"snz-{row}")
+        step = ud.get("step","")
+        if step == "edit_date":
+            row = ud.get("editing_row")
+            r = sheet.row_values(row)
+            t_val = norm_time(r[3]) if len(r) > 3 else ""
+            if t_val and is_past(ds, t_val, tz):
+                await safe_edit(q.message, f"{past_msg(t_val)}\n\nPick another date:", cal_kb(int(ds[:4]), int(ds[5:7]), tz, f"view_{row}", "« Back"))
+                return True
+            sheet.update_cell(row, 3, ds)
+            r, m, dd, t, rp = row_detail(row)
+            await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(m, ds, t, rp)}", IKM([[IKB("« Back", callback_data=f"view_{row}")]]))
+            ud.pop("step", None); ud.pop("editing_row", None)
+            return True
+        elif step == "g_date":
+            ud["date"] = ds
+            if ud.get("time"):
+                if is_past(ds, ud["time"], tz):
+                    now = datetime.now(tz)
+                    await safe_edit(q.message, f"{past_msg(ud['time'])}\n\nPick another date:", cal_kb(now.year, now.month, tz, "gcancel", "✕ Cancel"))
+                    return True
+                await finish_group_remind(update=None, ctx=ctx)
+                await safe_edit(q.message, "✓", None)
+                return True
+            ud["step"] = "g_time"
+            gid = ud.get("g_chat")
+            await safe_edit(q.message, f"{ud.get('message','')}\n{fmt_date(ds)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", None)
+            return True
         else:
+            ud["date"] = ds; ud["step"] = "time"
+            await safe_edit(q.message, f"{ud.get('message','')}\n{fmt_date(ds)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", IKM([[IKB("✕ Cancel", callback_data="cancel")]]))
+            return True
+    return False
+
+async def _btn_reminder(q, ctx, d, ud, uid):
+    # VIEW
+    if d.startswith("view_"):
+        row = int(d.replace("view_",""))
+        r, m, dd, t, rp = row_detail(row)
+        if not r: await safe_edit(q.message, "Not found.", IKM([[IKB("« Back", callback_data="home")]])); return True
+        s = r[5] if len(r) > 5 else "active"
+        ic = ST_IC.get(s,"○"); sl = ST_LB.get(s,"Active")
+        text = f"{hdr('Reminder')}\n{detail(m, dd, t, rp)}\n{ic} {sl}"
+        btns = []
+        if s in ("active","pending","snoozed"):
+            btns.append([IKB("✎ Edit", callback_data=f"edit_{row}"), IKB("✕ Cancel", callback_data=f"crem_{row}")])
+        elif s == "missed":
+            btns.append([IKB("✕ Remove", callback_data=f"crem_{row}")])
+        elif s == "cancelled":
+            btns.append([IKB("↩ Undo", callback_data=f"undo_{row}")])
+        btns.append([IKB("« Back", callback_data="list_refresh")])
+        await safe_edit(q.message, text, IKM(btns))
+        return True
+    # LIST REFRESH
+    if d == "list_refresh":
+        await show_list(update=None, ctx=ctx, new=False)
+        uid_val = q.from_user.id
+        rows = sheet.get_all_values()
+        items = []
+        for i, r in enumerate(rows[1:], start=2):
+            if str(r[0]) != str(uid_val): continue
+            if len(r) < 6: continue
+            if r[5] in ("done","cancelled"): continue
+            if len(r) > 7 and r[7]: continue
+            m, dd, t, rp = get_detail(r)
+            items.append((i, m, dd, t, r[5]))
+        if not items:
+            await safe_edit(q.message, f"{hdr('Reminders')}\n\nNo active reminders.", IKM([[IKB("« Back", callback_data="home")]]))
+            return True
+        lines = [hdr("Reminders"), ""]
+        for idx, (i, m, dd, t, s) in enumerate(items, 1):
+            ic = ST_IC.get(s, "○")
+            lines.append(f"{idx} {ic} {m[:30]}{'…' if len(m)>30 else ''}\n   {fmt_date(dd)} · {fmt_time(t)}")
+        btns = []; row_btns = []
+        for idx, (i, *_) in enumerate(items, 1):
+            row_btns.append(IKB(str(idx), callback_data=f"view_{i}"))
+            if len(row_btns) == 5: btns.append(row_btns); row_btns = []
+        if row_btns: btns.append(row_btns)
+        btns.append([IKB("« Back", callback_data="home")])
+        await safe_edit(q.message, "\n".join(lines), IKM(btns))
+        return True
+    # SNOOZE PICKER
+    if d.startswith("snzp_"):
+        row = int(d.replace("snzp_",""))
+        r = sheet.row_values(row)
+        if guard(q, r):
+            m, dd, t, rp = get_detail(r)
+            await safe_edit(q.message, f"{detail(m,dd,t,rp)}\n\n<i>Already handled</i>", None)
+            return True
+        await safe_edit(q.message, q.message.text, snz_kb(row))
+        return True
+    # SNOOZE BACK
+    if d.startswith("snzb_"):
+        row = int(d.replace("snzb_",""))
+        await safe_edit(q.message, q.message.text, reminder_kb(row))
+        return True
+    # SNOOZE DO
+    if d.startswith("snz_"):
+        parts = d.replace("snz_","").split("_")
+        row = int(parts[0]); mins = int(parts[1])
+        r = sheet.row_values(row)
+        if guard(q, r):
+            m, dd, t, rp = get_detail(r)
+            await safe_edit(q.message, f"{detail(m,dd,t,rp)}\n\n<i>Already handled</i>", None)
+            return True
+        tz = get_tz(uid)
+        now = datetime.now(tz); snz_time = now + timedelta(minutes=mins)
+        m, dd, t, rp = get_detail(r)
+        jobs = ctx.job_queue.get_jobs_by_name(f"retry-{row}")
+        for j in jobs: j.schedule_removal()
+        rep = r[4] if len(r) > 4 else "none"
+        is_group = len(r) > 7 and r[7]
+        if rep == "none" or rep == "":
             sheet.update_cell(row, 3, snz_time.strftime("%Y-%m-%d"))
             sheet.update_cell(row, 4, snz_time.strftime("%H:%M"))
             sheet.update_cell(row, 6, "active")
             sheet.update_cell(row, 7, 0)
-        if tid and gid:
-            set_tstatus(tid, uid, "snoozed")
+        else:
+            sheet.update_cell(row, 6, "snoozed")
+            ctx.job_queue.run_once(snooze_fire, mins*60, data={"row":row,"chat":uid}, name=f"snzfire-{row}")
+        if is_group:
+            tid = r[8] if len(r) > 8 else ""
+            if tid: set_tstatus(tid, str(uid), "snoozed"); await update_gstatus(ctx, tid, m)
         label = f"{mins}m" if mins < 60 else f"{mins//60}h"
-        await safe_edit(q.message,
-            f"{detail(msg, ds, ts, rep)}\n\n<b>Snoozed {label}</b> \u2192 {fmt_time(snz_time.strftime('%H:%M'))}",
-            home_kb())
-        return
+        await safe_edit(q.message, f"{detail(m,dd,t,rp)}\n\n<b>Snoozed {label}</b> → {fmt_time(snz_time.strftime('%H:%M'))}", None)
+        return True
     # DONE
     if d.startswith("done_"):
-        row = int(d.replace("done_", ""))
+        row = int(d.replace("done_",""))
         r = sheet.row_values(row)
-        if len(r) > 5 and r[5] not in ("pending", "snoozed"):
-            await safe_edit(q.message, f"{hdr('Already handled')}", home_kb())
-            return
-        cancel_jobs(ctx, f"retry-{row}")
-        msg, ds, ts, rep, st = get_detail(r)
-        gid = r[7] if len(r) > 7 else ""
+        if guard(q, r):
+            m, dd, t, rp = get_detail(r)
+            await safe_edit(q.message, f"{detail(m,dd,t,rp)}\n\n<i>Already handled</i>", None)
+            return True
+        m, dd, t, rp = get_detail(r)
+        jobs = ctx.job_queue.get_jobs_by_name(f"retry-{row}")
+        for j in jobs: j.schedule_removal()
+        rep = r[4] if len(r) > 4 else "none"
+        is_group = len(r) > 7 and r[7]
         tid = r[8] if len(r) > 8 else ""
-        if rep and rep != "none":
-            advance_rep(row, rep, ds, ts)
+        if rep != "none" and rep != "":
+            advance_rep(row, r)
         else:
             sheet.update_cell(row, 6, "done")
-        sheet.update_cell(row, 7, 0)
-        if tid and gid:
-            set_tstatus(tid, uid, "done")
-            await _update_group_status(ctx, gid, tid, r)
-        await safe_edit(q.message, f"{detail(msg, ds, ts, rep)}\n\n<b>Done \u2713</b>", home_kb())
-        return
-    # UNDO CANCEL
-    if d.startswith("undo_"):
-        row = int(d.replace("undo_", ""))
-        r = sheet.row_values(row)
-        if r:
-            sheet.update_cell(row, 6, "active")
-            msg, ds, ts, rep, _ = get_detail(r)
-            await safe_edit(q.message, f"{hdr('Restored \u2713')}\n{detail(msg, ds, ts, rep)}", home_kb())
-        return
-    # VIEW (from list)
-    if d.startswith("view_"):
-        row = int(d.replace("view_", ""))
-        r = sheet.row_values(row)
-        if not r:
-            await safe_edit(q.message, "Not found.", home_kb())
-            return
-        msg, ds, ts, rep, st = get_detail(r)
-        ic = ST_IC.get(st, "\u25cb")
-        lb = ST_LB.get(st, st)
-        txt = f"{hdr('Reminder')}\n{msg}\n\n{fmt_date(ds)} \u00b7 {fmt_time(ts)}\n{rep_label(rep)} \u00b7 {ic} {lb}"
-        btns = []
-        if st in ("active", "pending", "snoozed"):
-            btns.append([IKB("\u270e Edit", callback_data=f"edit_{row}"), IKB("\u2715 Cancel", callback_data=f"crem_{row}")])
-        elif st == "missed":
-            btns.append([IKB("\u2715 Remove", callback_data=f"crem_{row}")])
-        btns.append([IKB("\u00ab Back", callback_data="back_list")])
-        await safe_edit(q.message, txt, IKM(btns))
-        return
-    if d == "back_list":
-        await _private_list(q, ctx, new=False)
-        return
-    # EDIT
-    if d.startswith("edit_"):
-        row = int(d.replace("edit_", ""))
-        r = sheet.row_values(row)
-        if not r:
-            return
-        msg, ds, ts, rep, st = get_detail(r)
-        txt = f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rep)}\n\nWhat to change?"
-        btns = [
-            [IKB("Message", callback_data=f"emsg_{row}"), IKB("Date", callback_data=f"edate_{row}"),
-             IKB("Time", callback_data=f"etime_{row}")],
-            [IKB("\u00ab Back", callback_data=f"view_{row}")]
-        ]
-        await safe_edit(q.message, txt, IKM(btns))
-        return
-    if d.startswith("emsg_"):
-        row = int(d.replace("emsg_", ""))
-        r = sheet.row_values(row)
-        msg, ds, ts, rep, st = get_detail(r)
-        ctx.user_data["step"] = "edit_message"
-        ctx.user_data["editing_row"] = row
-        sent = await q.message.reply_text(
-            f"{detail(msg, ds, ts, rep)}\n\nEnter new message:", parse_mode="HTML",
-            reply_markup=IKM([[IKB("\u00ab Back", callback_data=f"edit_{row}")]]))
-        store_prompt(ctx.user_data, sent)
-        return
-    if d.startswith("edate_"):
-        row = int(d.replace("edate_", ""))
-        r = sheet.row_values(row)
-        msg, ds, ts, rep, st = get_detail(r)
-        ctx.user_data["step"] = "edit_date"
-        ctx.user_data["editing_row"] = row
-        ctx.user_data["edit_old_time"] = ts
-        tz = get_tz(uid)
-        now = datetime.now(tz)
-        await safe_edit(q.message, f"{detail(msg, ds, ts, rep)}\n\nPick new date:",
-            cal_kb(now.year, now.month, tz, f"edit_{row}", "\u00ab Back"))
-        return
-    if d.startswith("etime_"):
-        row = int(d.replace("etime_", ""))
-        r = sheet.row_values(row)
-        msg, ds, ts, rep, st = get_detail(r)
-        ctx.user_data["step"] = "edit_time"
-        ctx.user_data["editing_row"] = row
-        ctx.user_data["edit_old_date"] = ds
-        sent = await q.message.reply_text(
-            f"{detail(msg, ds, ts, rep)}\n\nEnter new time:\ne.g. 9pm, 9:30 PM, 21:30",
-            parse_mode="HTML", reply_markup=IKM([[IKB("\u00ab Back", callback_data=f"edit_{row}")]]))
-        store_prompt(ctx.user_data, sent)
-        return
+            sheet.update_cell(row, 7, 0)
+        if is_group and tid:
+            set_tstatus(tid, str(uid), "done")
+            await update_gstatus(ctx, tid, m)
+        await safe_edit(q.message, f"{detail(m,dd,t,rp)}\n\n<b>Done ✓</b>", None)
+        return True
     # CANCEL REMINDER
     if d.startswith("crem_"):
-        row = int(d.replace("crem_", ""))
-        cancel_jobs(ctx, f"retry-{row}")
-        r = sheet.row_values(row)
-        msg, ds, ts, rep, st = get_detail(r)
+        row = int(d.replace("crem_",""))
+        r, m, dd, t, rp = row_detail(row)
+        if not r: return True
+        jobs = ctx.job_queue.get_jobs_by_name(f"retry-{row}")
+        for j in jobs: j.schedule_removal()
         sheet.update_cell(row, 6, "cancelled")
         sheet.update_cell(row, 7, 0)
-        await safe_edit(q.message, f"{detail(msg, ds, ts, rep)}\n\n<b>Cancelled \u2718</b>",
-            IKM([[IKB("\u21a9 Undo", callback_data=f"undo_{row}"), IKB("\uff0b New", callback_data="add")]]))
-        return
-    # GROUP BUTTONS
+        await safe_edit(q.message, f"{hdr('Cancelled ✕')}\n{detail(m,dd,t,rp)}", IKM([[IKB("↩ Undo", callback_data=f"undo_{row}")], [IKB("＋ New", callback_data="add")]]))
+        return True
+    # UNDO CANCEL
+    if d.startswith("undo_"):
+        row = int(d.replace("undo_",""))
+        r, m, dd, t, rp = row_detail(row)
+        if not r: return True
+        sheet.update_cell(row, 6, "active")
+        await safe_edit(q.message, f"{hdr('Restored ✓')}\n{detail(m,dd,t,rp)}", IKM([[IKB("« Back", callback_data=f"view_{row}")]]))
+        return True
+    # CHANGE REPEAT (from saved)
+    if d.startswith("chrep_") and d.endswith("_show"):
+        row = int(d.replace("chrep_","").replace("_show",""))
+        await safe_edit(q.message, q.message.text, repeat_kb(row))
+        return True
+    if d.startswith("chrep_") and d.endswith("_back"):
+        row = int(d.replace("chrep_","").replace("_back",""))
+        r, m, dd, t, rp = row_detail(row)
+        if not r: return True
+        text = f"{hdr('Saved ✓')}\n{detail(m,dd,t,rp)}"
+        btns = []
+        if rp == "none": btns.append([IKB("🔁 Repeat", callback_data=f"chrep_{row}_show")])
+        btns.append([IKB("✎ Edit", callback_data=f"edit_{row}")])
+        btns.append([IKB("＋ New", callback_data="add")])
+        await safe_edit(q.message, text, IKM(btns))
+        return True
+    if d.startswith("chrep_") and "_custom" in d:
+        row = int(d.split("_")[1])
+        ud["custom_days"] = []; ud["custom_row"] = row
+        await safe_edit(q.message, q.message.text, custom_days_kb([], row))
+        return True
+    if d.startswith("chrep_"):
+        parts = d.replace("chrep_","").split("_")
+        if len(parts) == 2:
+            row = int(parts[0]); rep = parts[1]
+            if rep in ("daily","weekly","monthly"):
+                sheet.update_cell(row, 5, rep)
+                r, m, dd, t, rp = row_detail(row)
+                text = f"{hdr('Updated ✓')}\n{detail(m,dd,t,rep)}"
+                await safe_edit(q.message, text, IKM([[IKB("✎ Edit", callback_data=f"edit_{row}")], [IKB("＋ New", callback_data="add")]]))
+                return True
+    # CUSTOM DAYS
+    if d.startswith("cday_"):
+        parts = d.replace("cday_","").split("_")
+        row_s = parts[0]; day = parts[1] if len(parts) > 1 else ""
+        row = int(row_s) if row_s else None
+        sel = ud.get("custom_days", [])
+        if day == "mf": sel = ["mon","tue","wed","thu","fri"]
+        elif day == "all": sel = list(DAYS)
+        elif day == "clear": sel = []
+        elif day in DAYS:
+            if day in sel: sel.remove(day)
+            else: sel.append(day)
+        ud["custom_days"] = sel
+        await safe_edit(q.message, q.message.text, custom_days_kb(sel, row))
+        return True
+    if d.startswith("csave_"):
+        row_s = d.replace("csave_","")
+        row = int(row_s) if row_s else None
+        sel = ud.get("custom_days", [])
+        rep = "custom:" + ",".join(d for d in DAYS if d in sel)
+        if row:
+            sheet.update_cell(row, 5, rep)
+            r, m, dd, t, rp = row_detail(row)
+            text = f"{hdr('Updated ✓')}\n{detail(m,dd,t,rep)}"
+            await safe_edit(q.message, text, IKM([[IKB("✎ Edit", callback_data=f"edit_{row}")], [IKB("＋ New", callback_data="add")]]))
+        ud.pop("custom_days", None); ud.pop("custom_row", None)
+        return True
+    # REPEAT (from step-by-step / NL)
+    if d.startswith("rep_"):
+        rep = d.replace("rep_","")
+        if rep == "custom":
+            ud["custom_days"] = []
+            await safe_edit(q.message, q.message.text, custom_days_kb([]))
+            return True
+        if rep == "back":
+            await safe_edit(q.message, q.message.text, repeat_kb())
+            return True
+        m = ud.get("message"); dd = ud.get("date"); t = ud.get("time")
+        if m and dd and t:
+            await save_reminder(update, ctx, m, dd, t, rep, q.message)
+            ud.clear()
+        return True
+    return False
+
+async def _btn_edit(q, ctx, d, ud, uid):
+    if d.startswith("edit_"):
+        row = int(d.replace("edit_",""))
+        r, m, dd, t, rp = row_detail(row)
+        if not r: return True
+        text = f"{hdr('Edit Reminder')}\n{detail(m,dd,t,rp)}\n\nWhat to change?"
+        kb = IKM([
+            [IKB("Message", callback_data=f"emsg_{row}"), IKB("Date", callback_data=f"edate_{row}"), IKB("Time", callback_data=f"etime_{row}")],
+            [IKB("Repeat", callback_data=f"chrep_{row}_show")],
+            [IKB("« Back", callback_data=f"view_{row}")]
+        ])
+        await safe_edit(q.message, text, kb)
+        return True
+    if d.startswith("emsg_"):
+        row = int(d.replace("emsg_",""))
+        r, m, dd, t, rp = row_detail(row)
+        ud["step"] = "edit_msg"; ud["editing_row"] = row
+        text = f"{hdr('Edit Message')}\n<i>{m}</i>\n{fmt_date(dd)} · {fmt_time(t)}\n\nEnter new message:"
+        await safe_edit(q.message, text, IKM([[IKB("« Back", callback_data=f"edit_{row}")]]))
+        return True
+    if d.startswith("edate_"):
+        row = int(d.replace("edate_",""))
+        ud["step"] = "edit_date"; ud["editing_row"] = row
+        tz = get_tz(uid); now = datetime.now(tz)
+        r, m, dd, t, rp = row_detail(row)
+        text = f"{hdr('Edit Date')}\n{m}\n<i>{fmt_date(dd)}</i> · {fmt_time(t)}\n\nPick new date:"
+        await safe_edit(q.message, text, cal_kb(now.year, now.month, tz, f"view_{row}", "« Back"))
+        return True
+    if d.startswith("etime_"):
+        row = int(d.replace("etime_",""))
+        ud["step"] = "edit_time"; ud["editing_row"] = row
+        r, m, dd, t, rp = row_detail(row)
+        text = f"{hdr('Edit Time')}\n{m}\n{fmt_date(dd)} · <i>{fmt_time(t)}</i>\n\nEnter new time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>"
+        await safe_edit(q.message, text, IKM([[IKB("« Back", callback_data=f"edit_{row}")]]))
+        return True
+    return False
+
+async def _btn_settings(q, ctx, d, ud, uid):
+    if d == "cfg_digest":
+        cfg = get_cfg(uid)
+        new_val = "false" if cfg["digest_on"] == "true" else "true"
+        save_cfg(uid, "digest_on", new_val)
+        await show_settings(q.message, uid, new=False)
+        return True
+    if d == "cfg_report":
+        cfg = get_cfg(uid)
+        new_val = "false" if cfg.get("weekly_report","true") == "true" else "true"
+        save_cfg(uid, "weekly_report", new_val)
+        await show_settings(q.message, uid, new=False)
+        return True
+    if d == "cfg_dtime":
+        ud["step"] = "cfg_dtime"
+        await safe_edit(q.message, f"{hdr('Digest Time')}\n\nEnter time:\n<i>e.g. 7am, 8:30 PM</i>", IKM([[IKB("« Back", callback_data="cfg_back")]]))
+        return True
+    if d == "cfg_back":
+        ud.pop("step", None)
+        await show_settings(q.message, uid, new=False)
+        return True
+    if d == "cfg_retries":
+        opts = [1,2,3,5,7,10]
+        btns = [[IKB(f"{n}×", callback_data=f"cfgr_{n}") for n in opts[:3]], [IKB(f"{n}×", callback_data=f"cfgr_{n}") for n in opts[3:]]]
+        btns.append([IKB("« Back", callback_data="cfg_back")])
+        await safe_edit(q.message, f"{hdr('Max Retries')}\n\nPick:", IKM(btns))
+        return True
+    if d.startswith("cfgr_"):
+        n = int(d.replace("cfgr_",""))
+        save_cfg(uid, "max_retries", n)
+        await show_settings(q.message, uid, new=False)
+        return True
+    if d == "cfg_gap":
+        opts = [5,10,15,20,30,60]
+        btns = [[IKB(f"{n}m", callback_data=f"cfgg_{n}") for n in opts[:3]], [IKB(f"{n}m", callback_data=f"cfgg_{n}") for n in opts[3:]]]
+        btns.append([IKB("« Back", callback_data="cfg_back")])
+        await safe_edit(q.message, f"{hdr('Retry Gap')}\n\nPick:", IKM(btns))
+        return True
+    if d.startswith("cfgg_"):
+        n = int(d.replace("cfgg_",""))
+        save_cfg(uid, "retry_gap", n)
+        await show_settings(q.message, uid, new=False)
+        return True
+    if d == "cfg_tz":
+        btns = [[IKB(f"{TZ_ICONS.get(r,'🌍')} {r}", callback_data=f"tzr_{r}") for r in list(TZ_DATA.keys())[:2]]]
+        btns.append([IKB(f"{TZ_ICONS.get(r,'🌍')} {r}", callback_data=f"tzr_{r}") for r in list(TZ_DATA.keys())[2:4]])
+        btns.append([IKB(f"{TZ_ICONS.get(r,'🌍')} {r}", callback_data=f"tzr_{r}") for r in list(TZ_DATA.keys())[4:]])
+        btns.append([IKB("« Back", callback_data="cfg_back")])
+        await safe_edit(q.message, f"{hdr('Timezone')}\n\nPick region:", IKM(btns))
+        return True
+    if d.startswith("tzr_"):
+        region = d.replace("tzr_","")
+        tzs = TZ_DATA.get(region, [])
+        cfg = get_cfg(uid); cur = cfg.get("timezone", DEF_TZ)
+        btns = []
+        for label, tz_name in tzs:
+            mark = "▸ " if tz_name == cur else ""
+            btns.append([IKB(f"{mark}{label}", callback_data=f"tzs_{tz_name}")])
+        btns.append([IKB("« Regions", callback_data="cfg_tz")])
+        await safe_edit(q.message, f"{hdr('Timezone')}\n\n{region}:", IKM(btns))
+        return True
+    if d.startswith("tzs_"):
+        tz_name = d.replace("tzs_","")
+        save_cfg(uid, "timezone", tz_name)
+        await show_settings(q.message, uid, new=False)
+        return True
+    return False
+
+async def _btn_group(q, ctx, d, ud, uid):
     if d.startswith("gjoin_"):
-        tid = d.replace("gjoin_", "")
-        name = q.from_user.first_name or "User"
-        uname = q.from_user.username or ""
+        tid = d.replace("gjoin_","")
+        fname = q.from_user.first_name or ""; uname = (q.from_user.username or "").lower()
         gid = q.message.chat_id
-        set_gsub(gid, uid, name, uname, True)
-        members = get_tmembers(tid)
-        uid_s = str(uid)
-        found = False
-        for mu, mn, ms in members:
-            if mu == uid_s:
-                found = True
-                if ms == "skipped":
-                    set_tstatus(tid, uid, "waiting")
-                break
-        if not found:
-            add_tmember(tid, uid, name, "waiting")
-        members = get_tmembers(tid)
-        active = [(u, n, s) for u, n, s in members if s != "skipped"]
-        rows_all = sheet.get_all_values()
-        rem_row = None
-        for i, r in enumerate(rows_all[1:], start=2):
-            if len(r) > 8 and r[8] == tid:
-                rem_row = r
-                break
-        if rem_row:
-            msg, ds, ts, rep, st = get_detail(rem_row)
-            creator_name = ""
-            for mu, mn, ms in members:
-                if mu == rem_row[0]:
-                    creator_name = mn
-                    break
-            sub_line = f"{len(active)} subscribed" + (f": {', '.join(n for _,n,_ in active)}" if active else "")
-            txt = (f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, rep)}\n"
-                   f"By {creator_name}\n\n{sub_line}")
-            btns = [[IKB("\uff0b Count Me In", callback_data=f"gjoin_{tid}"),
-                     IKB("\u2715 Skip", callback_data=f"gskip_{tid}")]]
-            await safe_edit(q.message, txt, IKM(btns))
-        return
+        set_gsub(gid, uid, fname, uname)
+        add_tmember(tid, str(uid), fname, "waiting")
+        row_i, r = find_by_tid(tid)
+        if r:
+            m, dd, t, rp = get_detail(r)
+            subs = [(u,n,s) for u,n,s in get_tmembers(tid) if s != "skipped"]
+            sub_names = ", ".join(n for _,n,_ in subs)
+            text = f"{detail(m,dd,t,rp)}\nBy {r[0]}\n\n{len(subs)} subscribed: {sub_names}"
+            kb = IKM([[IKB("＋ Count Me In", callback_data=f"gjoin_{tid}"), IKB("✕ Skip", callback_data=f"gskip_{tid}")],
+                      [IKB("🔁 Repeat", callback_data=f"grep_{tid}")]])
+            await safe_edit(q.message, text, kb)
+        return True
     if d.startswith("gskip_"):
-        tid = d.replace("gskip_", "")
-        uid_s = str(uid)
-        uname = q.from_user.username or ""
+        tid = d.replace("gskip_","")
+        set_tstatus(tid, str(uid), "skipped")
+        fname = q.from_user.first_name or ""; uname = (q.from_user.username or "").lower()
         gid = q.message.chat_id
-        if uname:
-            set_gsub(gid, uid, q.from_user.first_name or "User", uname, True)
-        members = get_tmembers(tid)
-        found = False
-        for mu, mn, ms in members:
-            if mu == uid_s:
-                found = True
-                set_tstatus(tid, uid, "skipped")
-                break
-        members = get_tmembers(tid)
-        active = [(u, n, s) for u, n, s in members if s != "skipped"]
-        rows_all = sheet.get_all_values()
-        rem_row = None
-        for i, r in enumerate(rows_all[1:], start=2):
-            if len(r) > 8 and r[8] == tid:
-                rem_row = r
-                break
-        if rem_row:
-            msg, ds, ts, rep, st = get_detail(rem_row)
-            sub_line = f"{len(active)} subscribed" + (f": {', '.join(n for _,n,_ in active)}" if active else "")
-            txt = (f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, rep)}\nBy ...\n\n{sub_line}")
-            btns = [[IKB("\uff0b Count Me In", callback_data=f"gjoin_{tid}"),
-                     IKB("\u2715 Skip", callback_data=f"gskip_{tid}")]]
-            await safe_edit(q.message, txt, IKM(btns))
-        return
-    # MONTH
+        set_gsub(gid, uid, fname, uname)
+        row_i, r = find_by_tid(tid)
+        if r:
+            m, dd, t, rp = get_detail(r)
+            subs = [(u,n,s) for u,n,s in get_tmembers(tid) if s != "skipped"]
+            sub_names = ", ".join(n for _,n,_ in subs)
+            text = f"{detail(m,dd,t,rp)}\nBy {r[0]}\n\n{len(subs)} subscribed: {sub_names}"
+            kb = IKM([[IKB("＋ Count Me In", callback_data=f"gjoin_{tid}"), IKB("✕ Skip", callback_data=f"gskip_{tid}")],
+                      [IKB("🔁 Repeat", callback_data=f"grep_{tid}")]])
+            await safe_edit(q.message, text, kb)
+        return True
+    if d.startswith("grep_"):
+        tid = d.replace("grep_","")
+        row_i, r = find_by_tid(tid)
+        if not r: return True
+        prefix = f"grp_{tid}_"
+        btns = [
+            [IKB("Daily", callback_data=f"{prefix}daily"), IKB("Weekly", callback_data=f"{prefix}weekly")],
+            [IKB("Monthly", callback_data=f"{prefix}monthly")],
+            [IKB("« Back", callback_data=f"grpb_{tid}")]
+        ]
+        await safe_edit(q.message, q.message.text, IKM(btns))
+        return True
+    if d.startswith("grp_") and not d.startswith("grpb_"):
+        parts = d.replace("grp_","").rsplit("_",1)
+        tid = parts[0]; rep = parts[1]
+        row_i, r = find_by_tid(tid)
+        if row_i and rep in ("daily","weekly","monthly"):
+            sheet.update_cell(row_i, 5, rep)
+            r = sheet.row_values(row_i)
+            m, dd, t, rp = get_detail(r)
+            subs = [(u,n,s) for u,n,s in get_tmembers(tid) if s != "skipped"]
+            sub_names = ", ".join(n for _,n,_ in subs)
+            text = f"{detail(m,dd,t,rep)}\nBy {r[0]}\n\n{len(subs)} subscribed: {sub_names}"
+            kb = IKM([[IKB("＋ Count Me In", callback_data=f"gjoin_{tid}"), IKB("✕ Skip", callback_data=f"gskip_{tid}")],
+                      [IKB("🔁 Repeat", callback_data=f"grep_{tid}")]])
+            await safe_edit(q.message, text, kb)
+        return True
+    if d.startswith("grpb_"):
+        tid = d.replace("grpb_","")
+        row_i, r = find_by_tid(tid)
+        if r:
+            m, dd, t, rp = get_detail(r)
+            subs = [(u,n,s) for u,n,s in get_tmembers(tid) if s != "skipped"]
+            sub_names = ", ".join(n for _,n,_ in subs)
+            text = f"{detail(m,dd,t,rp)}\nBy {r[0]}\n\n{len(subs)} subscribed: {sub_names}"
+            kb = IKM([[IKB("＋ Count Me In", callback_data=f"gjoin_{tid}"), IKB("✕ Skip", callback_data=f"gskip_{tid}")],
+                      [IKB("🔁 Repeat", callback_data=f"grep_{tid}")]])
+            await safe_edit(q.message, text, kb)
+        return True
+    return False
+
+async def _btn_month(q, ctx, d, ud, uid):
     if d.startswith("mw_"):
-        parts = d.replace("mw_", "").split("_")
-        y, m, wi = int(parts[0]), int(parts[1]), int(parts[2])
+        parts = d.replace("mw_","").split("_")
+        y, m, w = int(parts[0]), int(parts[1]), int(parts[2])
         tz = get_tz(uid)
-        txt, kb = _build_week(uid, y, m, wi, tz)
-        await safe_edit(q.message, txt, kb)
-        return
+        text, kb = build_week_view(uid, y, m, w, tz)
+        await safe_edit(q.message, text, kb)
+        return True
     if d.startswith("mn_"):
-        parts = d.replace("mn_", "").split("_")
+        parts = d.replace("mn_","").split("_")
         y, m = int(parts[0]), int(parts[1])
         tz = get_tz(uid)
-        txt, kb = _build_month(uid, y, m, tz)
-        await safe_edit(q.message, txt, kb)
-        return
-    # SETTINGS
-    if d.startswith("cfg_"):
-        await _btn_cfg(q, ctx, d)
-        return
+        text, kb = build_month_view(uid, y, m, tz)
+        await safe_edit(q.message, text, kb)
+        return True
+    if d == "mb_month":
+        tz = get_tz(uid); now = datetime.now(tz)
+        text, kb = build_month_view(uid, now.year, now.month, tz)
+        await safe_edit(q.message, text, kb)
+        return True
+    return False
 
-async def _btn_cfg(q, ctx, d):
-    uid = q.from_user.id
-    cfg = get_cfg(uid)
-    if d == "cfg_digest":
-        cur = cfg.get("digest_on", "true")
-        new_val = "false" if cur == "true" else "true"
-        save_cfg(uid, "digest_on", new_val)
-        cfg["digest_on"] = new_val
-        await _show_settings(q.message, cfg, new=False)
-    elif d == "cfg_digtime":
-        ctx.user_data["step"] = "cfg_digtime"
-        await q.message.reply_text("Enter digest time:\ne.g. 7am, 8:30 PM, 06:00", parse_mode="HTML")
-    elif d == "cfg_retries":
-        btns = []
-        rb = []
-        for v in [1, 2, 3, 5, 7, 10]:
-            rb.append(IKB(f"{v}\u00d7", callback_data=f"cfg_rval_{v}"))
-            if len(rb) == 3:
-                btns.append(rb)
-                rb = []
-        if rb:
-            btns.append(rb)
-        btns.append([IKB("\u00ab Back", callback_data="cfg_back")])
-        await safe_edit(q.message, f"{hdr('Max Retries')}\nHow many retry notifications?", IKM(btns))
-    elif d.startswith("cfg_rval_"):
-        val = d.replace("cfg_rval_", "")
-        save_cfg(uid, "max_retries", val)
-        cfg["max_retries"] = val
-        await _show_settings(q.message, cfg, new=False)
-    elif d == "cfg_gap":
-        btns = []
-        rb = []
-        for v in [5, 10, 15, 20, 30, 60]:
-            rb.append(IKB(f"{v}m", callback_data=f"cfg_gval_{v}"))
-            if len(rb) == 3:
-                btns.append(rb)
-                rb = []
-        if rb:
-            btns.append(rb)
-        btns.append([IKB("\u00ab Back", callback_data="cfg_back")])
-        await safe_edit(q.message, f"{hdr('Retry Gap')}\nMinutes between retries?", IKM(btns))
-    elif d.startswith("cfg_gval_"):
-        val = d.replace("cfg_gval_", "")
-        save_cfg(uid, "retry_gap", val)
-        cfg["retry_gap"] = val
-        await _show_settings(q.message, cfg, new=False)
-    elif d == "cfg_tz":
-        btns = [[IKB(f"{TZ_ICONS.get(r, '')} {r}", callback_data=f"cfg_tzr_{r}")] for r in TZ_REGIONS]
-        btns.append([IKB("\u00ab Back", callback_data="cfg_back")])
-        await safe_edit(q.message, f"{hdr('Timezone')}\nPick your region:", IKM(btns))
-    elif d.startswith("cfg_tzr_"):
-        region = d.replace("cfg_tzr_", "")
-        tzs = TZ_DATA.get(region, [])
-        cur_tz = cfg.get("timezone", DEF_TZ)
-        btns = []
-        for label, tzn in tzs:
-            dt = datetime.now(pytz.timezone(tzn))
-            off = dt.strftime("%z")
-            o = f"{off[:3]}:{off[3:]}"
-            mark = " \u2713" if tzn == cur_tz else ""
-            btns.append([IKB(f"{label} {o}{mark}", callback_data=f"cfg_tzs_{tzn}")])
-        btns.append([IKB("\u00ab Regions", callback_data="cfg_tz")])
-        await safe_edit(q.message, f"{hdr('Timezone')}\n{region}:", IKM(btns))
-    elif d.startswith("cfg_tzs_"):
-        tzn = d.replace("cfg_tzs_", "")
-        save_cfg(uid, "timezone", tzn)
-        cfg["timezone"] = tzn
-        await _show_settings(q.message, cfg, new=False)
-    elif d == "cfg_weekly":
-        cur = cfg.get("weekly_report", "true")
-        new_val = "false" if cur == "true" else "true"
-        save_cfg(uid, "weekly_report", new_val)
-        cfg["weekly_report"] = new_val
-        await _show_settings(q.message, cfg, new=False)
-    elif d == "cfg_back":
-        await _show_settings(q.message, cfg, new=False)
-
-# ============= SAVE REMINDER =============
-async def _save_reminder(target, ctx):
-    ud = ctx.user_data
-    msg = ud.get("message", "")
-    ds = ud.get("date", "")
-    ts = ud.get("time", "")
-    rep = ud.get("repeat", "none")
-    uid = ud.get("uid", "")
-    if not uid and hasattr(target, "chat"):
-        uid = target.chat.id
-    rows = sheet.get_all_values()
-    row_num = len(rows) + 1
-    sheet.append_row([str(uid), msg, ds, ts, rep, "active", 0, "", ""], value_input_option="RAW")
-    txt = f"{hdr('Saved \u2713')}\n{detail(msg, ds, ts, rep)}"
-    btns = []
-    if rep == "none":
-        btns.append([IKB("\U0001f501 Repeat", callback_data=f"grep_{row_num}"),
-                     IKB("\u270e Edit", callback_data=f"edit_{row_num}"),
-                     IKB("\uff0b New", callback_data="add")])
-    else:
-        btns.append([IKB("\u270e Edit", callback_data=f"edit_{row_num}"),
-                     IKB("\uff0b New", callback_data="add")])
-    if hasattr(target, "reply_text") and callable(target.reply_text):
-        await target.reply_text(txt, parse_mode="HTML", reply_markup=IKM(btns))
-    else:
-        await safe_edit(target, txt, IKM(btns))
-    ud.clear()
-
-# ============= TEXT HANDLER =============
-async def on_text(update, ctx):
-    if not update.message or not update.message.text:
-        return
-    text = update.message.text.strip()
-    uid = update.effective_user.id
-    update_username(update.effective_user)
-    chat_type = update.effective_chat.type
-    step = ctx.user_data.get("step", "")
-    # Group text steps
-    if chat_type != "private":
-        if step == "g_message":
-            g_chat = ctx.user_data.get("g_chat")
-            if g_chat and g_chat == update.effective_chat.id:
-                tz = get_tz(uid)
-                parsed = parse_nl_partial(text, tz)
-                if parsed and parsed.get("message"):
-                    ctx.user_data["message"] = parsed["message"]
-                    if parsed.get("date"):
-                        ctx.user_data["date"] = parsed["date"]
-                    if parsed.get("time"):
-                        ctx.user_data["time"] = parsed["time"]
-                    if parsed.get("repeat"):
-                        ctx.user_data["repeat"] = parsed["repeat"]
-                    d_val = ctx.user_data.get("date")
-                    t_val = ctx.user_data.get("time")
-                    if d_val and t_val:
-                        if is_past(d_val, t_val, tz):
-                            now = datetime.now(tz)
-                            ctx.user_data["step"] = "g_date"
-                            await update.message.reply_text(
-                                f"{parsed['message']}\n\n{past_msg(t_val)}",
-                                parse_mode="HTML",
-                                reply_markup=cal_kb(now.year, now.month, tz, "gcancel"))
-                            return
-                        await _finish_group(update.message, ctx)
-                        return
-                    if t_val and not d_val:
-                        now2 = datetime.now(tz)
-                        td = now2.strftime("%Y-%m-%d")
-                        if not is_past(td, t_val, tz):
-                            ctx.user_data["date"] = td
-                            await _finish_group(update.message, ctx)
-                            return
-                        ctx.user_data["step"] = "g_date"
-                        await update.message.reply_text(
-                            f"{parsed['message']}\n{fmt_time(t_val)}\n\n{past_msg(t_val)}",
-                            parse_mode="HTML",
-                            reply_markup=cal_kb(now2.year, now2.month, tz, "gcancel"))
-                        return
-                    if d_val:
-                        ctx.user_data["step"] = "g_time"
-                        await update.message.reply_text(
-                            f"{hdr('Group Reminder')}\n{parsed['message']}\n{fmt_date(d_val)}\n\nEnter time:",
-                            parse_mode="HTML", reply_markup=ForceReply(selective=True))
-                        return
-                    ctx.user_data["message"] = parsed["message"]
-                else:
-                    ctx.user_data["message"] = text
-                ctx.user_data["step"] = "g_date"
-                now3 = datetime.now(tz)
-                await update.message.reply_text(
-                    f"{hdr('Group Reminder')}\n{ctx.user_data['message']}\n\nPick a date:",
-                    parse_mode="HTML",
-                    reply_markup=cal_kb(now3.year, now3.month, tz, "gcancel"))
-            return
-        if step == "g_time":
-            g_chat = ctx.user_data.get("g_chat")
-            if g_chat and g_chat == update.effective_chat.id:
-                t = parse_time(text)
-                if not t:
-                    await update.message.reply_text("Invalid time. Try: 9pm, 9:30 PM, 21:30",
-                        reply_markup=ForceReply(selective=True))
-                    return
-                tz = get_tz(uid)
-                ds = ctx.user_data.get("date", "")
-                if ds and is_past(ds, t, tz):
-                    await update.message.reply_text(past_msg(t), parse_mode="HTML",
-                        reply_markup=ForceReply(selective=True))
-                    return
-                ctx.user_data["time"] = t
-                await _finish_group(update.message, ctx)
-            return
-        return
-    # Private steps
-    if step == "message":
-        await rm_prompt(ctx.user_data, ctx.bot)
-        tz = get_tz(uid)
-        ctx.user_data["uid"] = uid
-        parsed = parse_nl_partial(text, tz)
-        if parsed and parsed.get("message"):
-            ctx.user_data["message"] = parsed["message"]
-            if parsed.get("date"):
-                ctx.user_data["date"] = parsed["date"]
-            if parsed.get("time"):
-                ctx.user_data["time"] = parsed["time"]
-            if parsed.get("repeat"):
-                ctx.user_data["repeat"] = parsed["repeat"]
-            d_val = ctx.user_data.get("date")
-            t_val = ctx.user_data.get("time")
-            if d_val and t_val:
-                if is_past(d_val, t_val, tz):
-                    now = datetime.now(tz)
-                    ctx.user_data["step"] = "date"
-                    sent = await update.message.reply_text(
-                        f"{parsed['message']}\n\n{past_msg(t_val)}",
-                        parse_mode="HTML",
-                        reply_markup=cal_kb(now.year, now.month, tz))
-                    return
-                await _save_reminder(update.message, ctx)
-                return
-            if t_val and not d_val:
-                now2 = datetime.now(tz)
-                td = now2.strftime("%Y-%m-%d")
-                if not is_past(td, t_val, tz):
-                    ctx.user_data["date"] = td
-                    await _save_reminder(update.message, ctx)
-                    return
-                ctx.user_data["step"] = "date"
-                sent = await update.message.reply_text(
-                    f"{parsed['message']}\n{fmt_time(t_val)}\n\n{past_msg(t_val)}",
-                    parse_mode="HTML",
-                    reply_markup=cal_kb(now2.year, now2.month, tz))
-                return
-            if d_val:
-                ctx.user_data["step"] = "time"
-                sent = await update.message.reply_text(
-                    f"{parsed['message']}\n{fmt_date(d_val)}\n\nEnter time:\ne.g. 9pm, 9:30 PM, 21:30",
-                    parse_mode="HTML")
-                store_prompt(ctx.user_data, sent)
-                return
-            ctx.user_data["message"] = parsed["message"]
-        else:
-            ctx.user_data["message"] = text
-        ctx.user_data["step"] = "date"
-        now3 = datetime.now(tz)
-        sent = await update.message.reply_text(
-            f"{ctx.user_data['message']}\n\nPick a date:",
-            parse_mode="HTML",
-            reply_markup=cal_kb(now3.year, now3.month, tz))
-        return
-    if step == "time":
-        await del_prompt(ctx.user_data, ctx.bot)
-        t = parse_time(text)
-        if not t:
-            sent = await update.message.reply_text("Invalid time. Try: 9pm, 9:30 PM, 21:30", parse_mode="HTML")
-            store_prompt(ctx.user_data, sent)
-            return
-        tz = get_tz(uid)
-        ds = ctx.user_data.get("date", "")
-        if ds and is_past(ds, t, tz):
-            sent = await update.message.reply_text(past_msg(t), parse_mode="HTML")
-            store_prompt(ctx.user_data, sent)
-            return
-        ctx.user_data["time"] = t
-        ctx.user_data["uid"] = uid
-        await _save_reminder(update.message, ctx)
-        return
-    if step == "edit_message":
-        await rm_prompt(ctx.user_data, ctx.bot)
-        row = ctx.user_data.get("editing_row")
-        if row:
-            sheet.update_cell(row, 2, text)
-            r = sheet.row_values(row)
-            msg, ds, ts, rep, st = get_detail(r)
-            await update.message.reply_text(f"{hdr('Updated \u2713')}\n{detail(msg, ds, ts, rep)}", parse_mode="HTML", reply_markup=home_kb())
-        ctx.user_data.clear()
-        return
-    if step == "edit_time":
-        await rm_prompt(ctx.user_data, ctx.bot)
-        t = parse_time(text)
-        if not t:
-            sent = await update.message.reply_text("Invalid time. Try: 9pm, 9:30 PM, 21:30", parse_mode="HTML")
-            store_prompt(ctx.user_data, sent)
-            return
-        row = ctx.user_data.get("editing_row")
-        ds = ctx.user_data.get("edit_old_date", "")
-        tz = get_tz(uid)
-        if ds and is_past(ds, t, tz):
-            sent = await update.message.reply_text(past_msg(t), parse_mode="HTML")
-            store_prompt(ctx.user_data, sent)
-            return
-        if row:
-            sheet.update_cell(row, 4, t)
-            r = sheet.row_values(row)
-            msg, _, ts, rep, st = get_detail(r)
-            await update.message.reply_text(f"{hdr('Updated \u2713')}\n{detail(msg, ds, t, rep)}", parse_mode="HTML", reply_markup=home_kb())
-        ctx.user_data.clear()
-        return
-    if step == "cfg_digtime":
-        t = parse_time(text)
-        if not t:
-            await update.message.reply_text("Invalid time. Try: 7am, 8:30 PM, 06:00")
-            return
-        save_cfg(uid, "digest_time", t)
-        cfg = get_cfg(uid)
-        ctx.user_data.clear()
-        await update.message.reply_text(f"Digest time set to {fmt_time(t)}", parse_mode="HTML")
-        return
-    # NL FALLBACK (no active step)
-    if not step:
-        tz = get_tz(uid)
-        parsed = parse_nl_partial(text, tz)
-        if not parsed or not parsed.get("message"):
-            return
-        ctx.user_data["uid"] = uid
-        ctx.user_data["message"] = parsed["message"]
-        if parsed.get("repeat"):
-            ctx.user_data["repeat"] = parsed["repeat"]
-        d_val = parsed.get("date")
-        t_val = parsed.get("time")
-        if d_val and t_val:
-            ctx.user_data["date"] = d_val
-            ctx.user_data["time"] = t_val
-            if is_past(d_val, t_val, tz):
-                now = datetime.now(tz)
-                ctx.user_data["step"] = "date"
-                sent = await update.message.reply_text(
-                    f"{parsed['message']}\n\n{past_msg(t_val)}",
-                    parse_mode="HTML",
-                    reply_markup=cal_kb(now.year, now.month, tz))
-                return
-            await _save_reminder(update.message, ctx)
-            return
-        if t_val:
-            ctx.user_data["time"] = t_val
-            now2 = datetime.now(tz)
-            td = now2.strftime("%Y-%m-%d")
-            if not is_past(td, t_val, tz):
-                ctx.user_data["date"] = td
-                await _save_reminder(update.message, ctx)
-                return
-            ctx.user_data["step"] = "date"
-            sent = await update.message.reply_text(
-                f"{parsed['message']}\n{fmt_time(t_val)}\n\n{past_msg(t_val)}",
-                parse_mode="HTML",
-                reply_markup=cal_kb(now2.year, now2.month, tz))
-            return
-        if d_val:
-            ctx.user_data["date"] = d_val
-            ctx.user_data["step"] = "time"
-            sent = await update.message.reply_text(
-                f"{parsed['message']}\n{fmt_date(d_val)}\n\nEnter time:\ne.g. 9pm, 9:30 PM, 21:30",
-                parse_mode="HTML")
-            store_prompt(ctx.user_data, sent)
-            return
-        ctx.user_data["step"] = "date"
-        now3 = datetime.now(tz)
-        sent = await update.message.reply_text(
-            f"{parsed['message']}\n\nPick a date:",
-            parse_mode="HTML",
-            reply_markup=cal_kb(now3.year, now3.month, tz))
-        return
-
-# ============= CANCEL JOBS =============
-def cancel_jobs(ctx, name):
-    jobs = ctx.job_queue.get_jobs_by_name(name)
-    for j in jobs:
-        j.schedule_removal()
-
-# ============= SNOOZE FIRE =============
-async def snooze_fire(ctx):
-    d = ctx.job.data
-    row, chat, uid_val = d["row"], d["chat"], d.get("uid", d["chat"])
+# ========== SNOOZE FIRE ==========
+async def snooze_fire(ctx: ContextTypes.DEFAULT_TYPE):
+    d = ctx.job.data; row = d["row"]; chat = d["chat"]
     r = sheet.row_values(row)
-    if not r or (len(r) > 5 and r[5] not in ("snoozed", "active")):
-        return
-    msg, ds, ts, rep, st = get_detail(r)
-    sheet.update_cell(row, 6, "pending")
-    sheet.update_cell(row, 7, 0)
-    txt = f"\u23f0 {msg}"
-    try:
-        sent = await ctx.bot.send_message(chat_id=chat, text=txt, reply_markup=reminder_kb(row), parse_mode="HTML")
-        ctx.bot_data[f"rmsg_{row}"] = {"mid": sent.message_id, "cid": chat}
-    except:
-        pass
-    gap = get_user_gap(uid_val)
-    ctx.job_queue.run_once(auto_retry, gap, data={"row": row, "chat": chat, "uid": uid_val, "count": 0}, name=f"retry-{row}")
+    if not r or r[5] not in ("snoozed","pending"): return
+    m, dd, t, rp = get_detail(r)
+    sheet.update_cell(row, 6, "pending"); sheet.update_cell(row, 7, 0)
+    text = f"⏰ {m}\n{fmt_date(dd)} · {fmt_time(t)}"
+    msg = await send_and_track(ctx, chat, text, reminder_kb(row))
+    if msg: store_rmsg(ctx.bot_data, row, msg.message_id, chat)
+    cfg = get_cfg(chat)
+    gap = int(cfg.get("retry_gap", DEF_RETRY_GAP)) * 60
+    ctx.job_queue.run_once(auto_retry, gap, data={"row":row,"chat":chat,"count":0}, name=f"retry-{row}")
 
-# ============= AUTO RETRY =============
-async def auto_retry(ctx):
-    d = ctx.job.data
-    row, chat, uid_val = d["row"], d["chat"], d.get("uid", d["chat"])
-    count = d.get("count", 0)
+# ========== AUTO RETRY ==========
+async def auto_retry(ctx: ContextTypes.DEFAULT_TYPE):
+    d = ctx.job.data; row = d["row"]; chat = d["chat"]; count = d.get("count", 0)
     r = sheet.row_values(row)
-    if not r:
-        return
-    st = r[5] if len(r) > 5 else ""
-    if st not in ("pending",):
-        return
-    max_ret = get_user_retries(uid_val)
-    if count >= max_ret:
+    if not r: return
+    if r[5] not in ("pending",): return
+    cfg = get_cfg(chat)
+    max_r = int(cfg.get("max_retries", DEF_RETRIES))
+    gap = int(cfg.get("retry_gap", DEF_RETRY_GAP)) * 60
+    if count >= max_r:
+        is_group = len(r) > 7 and r[7]
         rep = r[4] if len(r) > 4 else "none"
-        ds = norm_date(r[2]) if len(r) > 2 else ""
-        ts = norm_time(r[3]) if len(r) > 3 else ""
-        if rep and rep != "none":
-            advance_rep(row, rep, ds, ts)
-        else:
-            sheet.update_cell(row, 6, "missed")
-        sheet.update_cell(row, 7, 0)
-        gid = r[7] if len(r) > 7 else ""
-        tid = r[8] if len(r) > 8 else ""
-        if tid and gid:
-            set_tstatus(tid, str(uid_val), "missed")
-            await _update_group_status(ctx, gid, tid, r)
+        if rep != "none" and rep != "": advance_rep(row, r)
+        else: sheet.update_cell(row, 6, "missed")
+        if is_group:
+            tid = r[8] if len(r) > 8 else ""
+            if tid:
+                set_tstatus(tid, str(chat), "missed")
+                m = r[1] if len(r) > 1 else "?"
+                await update_gstatus(ctx, tid, m)
         return
-    msg = r[1] if len(r) > 1 else ""
-    old = ctx.bot_data.get(f"rmsg_{row}")
-    if old:
-        try:
-            await ctx.bot.edit_message_reply_markup(old["cid"], old["mid"], reply_markup=None)
-        except:
-            pass
-    txt = f"\U0001f514 {msg}\n<i>Retry {count+1}/{get_user_retries(uid_val)}</i>"
-    try:
-        sent = await ctx.bot.send_message(chat_id=chat, text=txt, reply_markup=reminder_kb(row), parse_mode="HTML")
-        ctx.bot_data[f"rmsg_{row}"] = {"mid": sent.message_id, "cid": chat}
-    except:
-        pass
+    m, dd, t, rp = get_detail(r)
     sheet.update_cell(row, 7, count + 1)
-    gap = get_user_gap(uid_val)
-    ctx.job_queue.run_once(auto_retry, gap, data={"row": row, "chat": chat, "uid": uid_val, "count": count + 1}, name=f"retry-{row}")
+    await rm_old_rmsg(ctx, ctx.bot_data, row)
+    text = f"🔔 {m} ({count+1}/{max_r})\n{fmt_date(dd)} · {fmt_time(t)}"
+    msg = await send_and_track(ctx, chat, text, reminder_kb(row))
+    if msg: store_rmsg(ctx.bot_data, row, msg.message_id, chat)
+    ctx.job_queue.run_once(auto_retry, gap, data={"row":row,"chat":chat,"count":count+1}, name=f"retry-{row}")
 
-# ============= GROUP STATUS UPDATE =============
-async def _update_group_status(ctx, gid, tid, rem_row):
-    members = get_tmembers(tid)
-    active = [(u, n, s) for u, n, s in members if s != "skipped"]
-    if not active:
-        return
-    all_done = all(s in ("done", "missed") for _, _, s in active)
-    msg = rem_row[1] if len(rem_row) > 1 else ""
-    if all_done:
-        all_really_done = all(s == "done" for _, _, s in active)
-        if all_really_done:
-            txt = f"{msg} \u00b7 \u2705 All done\n{', '.join(n for _, n, _ in active)}"
-        else:
-            parts = []
-            for u, n, s in active:
-                parts.append(f"{GT_IC.get(s, chr(9203))} {n}")
-            txt = f"{msg}\n\n{' \u00b7 '.join(parts)}"
-    else:
-        parts = []
-        for u, n, s in active:
-            parts.append(f"{GT_IC.get(s, chr(9203))} {n}")
-        txt = f"\u23f0 {msg}\n\n{' \u00b7 '.join(parts)}"
-    gmsg = ctx.bot_data.get(f"gmsg_{tid}")
-    if gmsg:
-        try:
-            await ctx.bot.edit_message_text(chat_id=gmsg["cid"], message_id=gmsg["mid"], text=txt, parse_mode="HTML")
-        except:
-            pass
-
-# ============= SCHEDULER =============
-async def check_reminders(ctx):
-    try:
-        client.login()
+# ========== SCHEDULER ==========
+async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
+    try: rows = sheet.get_all_values()
     except:
-        pass
-    now_utc = datetime.now(pytz.utc)
+        try: gclient.login(); rows = sheet.get_all_values()
+        except: return
+    if len(rows) <= 1: return
+    cfg_rows = {}
     try:
-        cfg_rows = cfg_sheet.get_all_values()
-    except:
-        try:
-            client.login()
-            cfg_rows = cfg_sheet.get_all_values()
-        except:
-            return
-    tz_map = {}
-    cfg_map = {}
-    for r in cfg_rows[1:]:
-        if not r:
-            continue
-        u = r[0]
-        tzn = r[5] if len(r) > 5 else DEF_TZ
-        tz_map[u] = safe_tz(tzn)
-        cfg_map[u] = {"max_retries": int(r[3]) if len(r) > 3 and r[3].isdigit() else DEF_RETRIES,
-                       "retry_gap": int(r[4]) if len(r) > 4 and r[4].isdigit() else DEF_RETRY_GAP}
-    try:
-        rows = sheet.get_all_values()
-    except:
-        return
+        all_cfg = cfg_sheet.get_all_values()
+        for cr in all_cfg[1:]:
+            if cr: cfg_rows[cr[0]] = cr
+    except: pass
     for i, r in enumerate(rows[1:], start=2):
-        if not r or len(r) < 6:
-            continue
-        st = r[5]
-        if st != "active":
-            continue
-        uid_s = r[0]
-        ds = norm_date(r[2])
-        ts = norm_time(r[3])
-        rep = r[4]
-        gid = r[7] if len(r) > 7 else ""
+        if len(r) < 6: continue
+        if r[5] != "active": continue
+        uid_s = r[0]; d = norm_date(r[2]); t = norm_time(r[3])
+        tz_name = DEF_TZ
+        if uid_s in cfg_rows:
+            cr = cfg_rows[uid_s]
+            if len(cr) > 5 and cr[5]: tz_name = cr[5]
+        tz = safe_tz(tz_name)
+        now = datetime.now(tz); now_str = now.strftime("%Y-%m-%d %H:%M")
+        rem_str = f"{d} {t}"
+        if rem_str != now_str: continue
+        is_group = len(r) > 7 and r[7]
         tid = r[8] if len(r) > 8 else ""
-        user_tz = tz_map.get(uid_s, safe_tz(DEF_TZ))
-        now_local = now_utc.astimezone(user_tz)
-        now_str = now_local.strftime("%Y-%m-%d %H:%M")
-        rem_str = f"{ds} {ts}"
-        if rem_str != now_str:
-            continue
-        if rep and rep.startswith("custom:") and not is_custom_match(rep, now_local):
-            continue
-        cancel_jobs(ctx, f"retry-{i}")
-        sheet.update_cell(i, 6, "pending")
-        sheet.update_cell(i, 7, 0)
-        msg = r[1]
-        if gid and tid:
-            members = get_tmembers(tid)
-            active = [(u, n, s) for u, n, s in members if s in ("waiting",)]
-            for mu, mn, ms in active:
-                set_tstatus(tid, mu, "pending")
-            status_parts = []
-            for u, n, s in get_tmembers(tid):
-                if s != "skipped":
-                    status_parts.append(f"{GT_IC.get('pending', chr(9203))} {n}")
-            status_txt = f"\u23f0 {msg}\n\n{' \u00b7 '.join(status_parts)}"
-            try:
-                sent = await ctx.bot.send_message(chat_id=int(gid), text=status_txt, parse_mode="HTML")
-                ctx.bot_data[f"gmsg_{tid}"] = {"mid": sent.message_id, "cid": int(gid)}
-            except:
-                pass
-            for mu, mn, ms in active:
-                try:
-                    s = await ctx.bot.send_message(chat_id=int(mu), text=f"\u23f0 {msg}\nFrom group",
-                        reply_markup=reminder_kb(i), parse_mode="HTML")
-                    ctx.bot_data[f"rmsg_{i}_{mu}"] = {"mid": s.message_id, "cid": int(mu)}
-                except:
-                    pass
-            c = cfg_map.get(uid_s, {"retry_gap": DEF_RETRY_GAP})
-            gap = c["retry_gap"] * 60
-            ctx.job_queue.run_once(grp_retry, gap, data={"row": i, "tid": tid, "gid": gid, "uid": uid_s, "count": 0}, name=f"retry-{i}")
-        else:
-            try:
-                sent = await ctx.bot.send_message(chat_id=int(uid_s), text=f"\u23f0 {msg}",
-                    reply_markup=reminder_kb(i), parse_mode="HTML")
-                ctx.bot_data[f"rmsg_{i}"] = {"mid": sent.message_id, "cid": int(uid_s)}
-            except:
-                pass
-            c = cfg_map.get(uid_s, {"retry_gap": DEF_RETRY_GAP})
-            gap = c["retry_gap"] * 60
-            ctx.job_queue.run_once(auto_retry, gap, data={"row": i, "chat": int(uid_s), "uid": int(uid_s), "count": 0}, name=f"retry-{i}")
-
-async def grp_retry(ctx):
-    d = ctx.job.data
-    row, tid, gid, uid_s = d["row"], d["tid"], d["gid"], d["uid"]
-    count = d.get("count", 0)
-    r = sheet.row_values(row)
-    if not r or (len(r) > 5 and r[5] != "pending"):
-        return
-    max_ret = get_user_retries(int(uid_s))
-    if count >= max_ret:
-        members = get_tmembers(tid)
-        for mu, mn, ms in members:
-            if ms == "pending":
-                set_tstatus(tid, mu, "missed")
+        m = r[1] if len(r) > 1 else "?"
         rep = r[4] if len(r) > 4 else "none"
-        ds = norm_date(r[2]) if len(r) > 2 else ""
-        ts = norm_time(r[3]) if len(r) > 3 else ""
-        if rep and rep != "none":
-            advance_rep(row, rep, ds, ts)
-            reset_tmembers(tid)
+        sheet.update_cell(i, 6, "pending"); sheet.update_cell(i, 7, 0)
+        jobs = ctx.job_queue.get_jobs_by_name(f"retry-{i}")
+        for j in jobs: j.schedule_removal()
+        cfg = {}
+        if uid_s in cfg_rows:
+            cr = cfg_rows[uid_s]
+            cfg = {"max_retries": cr[3] if len(cr)>3 else str(DEF_RETRIES), "retry_gap": cr[4] if len(cr)>4 else str(DEF_RETRY_GAP)}
+        gap = int(cfg.get("retry_gap", DEF_RETRY_GAP)) * 60
+        if is_group and tid:
+            members = get_tmembers(tid)
+            active = [(u,n,s) for u,n,s in members if s == "waiting"]
+            for u, n, s in active:
+                set_tstatus(tid, u, "pending")
+            setup_key = f"gsetup_{tid}"
+            sd = ctx.bot_data.get(setup_key)
+            if sd:
+                try: await ctx.bot.edit_message_reply_markup(sd["cid"], sd["mid"], reply_markup=None)
+                except: pass
+            grp_text = gstatus_text(tid, m)
+            gid = r[7]
+            msg = await send_and_track(ctx, gid, grp_text, None)
+            if msg: ctx.bot_data[f"gstatus_{tid}"] = {"mid": msg.message_id, "cid": gid}
+            for u, n, s in active:
+                text = f"⏰ {m}\nFrom: Group\n{fmt_date(d)} · {fmt_time(t)}"
+                await send_and_track(ctx, int(u), text, reminder_kb(i))
+            ctx.job_queue.run_once(grp_retry, gap, data={"row":i,"tid":tid,"count":0}, name=f"retry-{i}")
         else:
-            sheet.update_cell(row, 6, "missed")
-        sheet.update_cell(row, 7, 0)
-        await _update_group_status(ctx, gid, tid, r)
-        return
-    msg = r[1] if len(r) > 1 else ""
+            text = f"⏰ {m}\n{fmt_date(d)} · {fmt_time(t)}"
+            msg = await send_and_track(ctx, int(uid_s), text, reminder_kb(i))
+            if msg: store_rmsg(ctx.bot_data, i, msg.message_id, int(uid_s))
+            ctx.job_queue.run_once(auto_retry, gap, data={"row":i,"chat":int(uid_s),"count":0}, name=f"retry-{i}")
+
+async def grp_retry(ctx: ContextTypes.DEFAULT_TYPE):
+    d = ctx.job.data; row = d["row"]; tid = d["tid"]; count = d.get("count",0)
+    r = sheet.row_values(row)
+    if not r or r[5] != "pending": return
     members = get_tmembers(tid)
-    pending = [(u, n) for u, n, s in members if s == "pending"]
-    for mu, mn in pending:
-        old = ctx.bot_data.get(f"rmsg_{row}_{mu}")
-        if old:
-            try:
-                await ctx.bot.edit_message_reply_markup(old["cid"], old["mid"], reply_markup=None)
-            except:
-                pass
-        try:
-            s = await ctx.bot.send_message(chat_id=int(mu),
-                text=f"\U0001f514 {msg}\n<i>Retry {count+1}/{max_ret}</i>",
-                reply_markup=reminder_kb(row), parse_mode="HTML")
-            ctx.bot_data[f"rmsg_{row}_{mu}"] = {"mid": s.message_id, "cid": int(mu)}
-        except:
-            pass
-    sheet.update_cell(row, 7, count + 1)
-    c_cfg = cfg_map_for(uid_s)
-    gap = c_cfg * 60
-    ctx.job_queue.run_once(grp_retry, gap, data={"row": row, "tid": tid, "gid": gid, "uid": uid_s, "count": count + 1}, name=f"retry-{row}")
-
-def cfg_map_for(uid_s):
-    try:
-        rows = cfg_sheet.get_all_values()
-        for r in rows[1:]:
-            if r and r[0] == uid_s:
-                return int(r[4]) if len(r) > 4 and r[4].isdigit() else DEF_RETRY_GAP
-    except:
-        pass
-    return DEF_RETRY_GAP
-
-# ============= DAILY DIGEST =============
-async def check_digest(ctx):
-    try:
-        cfg_rows = cfg_sheet.get_all_values()
-    except:
+    pending = [(u,n) for u,n,s in members if s == "pending"]
+    if not pending: return
+    uid_s = r[0]
+    cfg = get_cfg(int(uid_s))
+    max_r = int(cfg.get("max_retries", DEF_RETRIES))
+    gap = int(cfg.get("retry_gap", DEF_RETRY_GAP)) * 60
+    if count >= max_r:
+        for u, n in pending:
+            set_tstatus(tid, u, "missed")
+        m = r[1] if len(r) > 1 else "?"
+        rep = r[4] if len(r) > 4 else "none"
+        if rep != "none" and rep != "": advance_rep(row, r)
+        else: sheet.update_cell(row, 6, "missed")
+        await update_gstatus(ctx, tid, m)
         return
-    for r in cfg_rows[1:]:
-        if not r or len(r) < 3:
-            continue
-        uid_s = r[0]
-        dig_on = r[1] if len(r) > 1 else "true"
-        dig_time = r[2] if len(r) > 2 else DEF_DIGEST_TIME
-        if dig_on != "true":
-            continue
-        tzn = r[5] if len(r) > 5 else DEF_TZ
-        tz = safe_tz(tzn)
-        now = datetime.now(tz)
-        now_hm = now.strftime("%H:%M")
-        dt = norm_time(dig_time)
-        if now_hm != dt:
-            continue
+    m, dd, t, rp = get_detail(r)
+    for u, n in pending:
+        text = f"🔔 {m} ({count+1}/{max_r})\nFrom: Group"
+        await send_and_track(ctx, int(u), text, reminder_kb(row))
+    ctx.job_queue.run_once(grp_retry, gap, data={"row":row,"tid":tid,"count":count+1}, name=f"retry-{i}")
+
+# ========== DAILY DIGEST ==========
+async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
+    try: all_cfg = cfg_sheet.get_all_values()
+    except: return
+    for cr in all_cfg[1:]:
+        if not cr or len(cr) < 3: continue
+        if cr[1] != "true": continue
+        uid_s = cr[0]; dt = cr[2] if cr[2] else DEF_DIGEST_TIME
+        tz_name = cr[5] if len(cr) > 5 and cr[5] else DEF_TZ
+        tz = safe_tz(tz_name); now = datetime.now(tz)
+        if now.strftime("%H:%M") != dt: continue
+        rows = sheet.get_all_values()
         today_s = now.strftime("%Y-%m-%d")
-        try:
-            rem_rows = sheet.get_all_values()
-        except:
-            continue
         items = []
-        for rr in rem_rows[1:]:
-            if not rr or rr[0] != uid_s:
-                continue
-            if len(rr) > 7 and rr[7]:
-                continue
-            st = rr[5] if len(rr) > 5 else ""
-            if st not in ("active", "snoozed", "pending"):
-                continue
-            ds = norm_date(rr[2]) if len(rr) > 2 else ""
-            if ds != today_s:
-                rep = rr[4] if len(rr) > 4 else ""
-                if rep == "daily":
-                    pass
-                elif rep.startswith("custom:") and is_custom_match(rep, now):
-                    pass
-                else:
-                    continue
-            ts = norm_time(rr[3]) if len(rr) > 3 else ""
-            msg = rr[1] if len(rr) > 1 else ""
-            items.append((ts, msg))
-        if not items:
-            continue
-        items.sort()
+        for r in rows[1:]:
+            if str(r[0]) != uid_s: continue
+            if len(r) < 6 or r[5] in ("done","cancelled","missed"): continue
+            d = norm_date(r[2])
+            if d != today_s: continue
+            items.append((norm_time(r[3]), r[1]))
         today_fmt = now.strftime("%-d %b")
-        lines = [f"\u2600\ufe0f Good morning!\n{hdr('Today \u2014 ' + today_fmt)}", ""]
-        for ts, msg in items:
-            lines.append(f"  {fmt_time(ts)} \u00b7 {msg}")
-        lines.append(f"\n{len(items)} reminder{'s' if len(items) != 1 else ''} today")
-        txt = "\n".join(lines)
-        try:
-            await ctx.bot.send_message(chat_id=int(uid_s), text=txt, parse_mode="HTML", reply_markup=home_kb())
-        except:
-            pass
-
-# ============= WEEKLY REPORT =============
-async def check_weekly_report(ctx):
-    try:
-        cfg_rows = cfg_sheet.get_all_values()
-    except:
-        return
-    for r in cfg_rows[1:]:
-        if not r:
-            continue
-        uid_s = r[0]
-        wr = r[7] if len(r) > 7 else "true"
-        if wr != "true":
-            continue
-        tzn = r[5] if len(r) > 5 else DEF_TZ
-        tz = safe_tz(tzn)
-        now = datetime.now(tz)
-        if now.weekday() != 6:
-            continue
-        if now.strftime("%H:%M") != "09:00":
-            continue
-        today = now.date()
-        week_start = today - timedelta(days=6)
-        try:
-            rem_rows = sheet.get_all_values()
-        except:
-            continue
-        done_c, missed_c, snoozed_c = 0, 0, 0
-        day_done = {}
-        day_missed = {}
-        done_list = []
-        missed_list = []
-        for rr in rem_rows[1:]:
-            if not rr or rr[0] != uid_s:
-                continue
-            if len(rr) > 7 and rr[7]:
-                continue
-            ds = norm_date(rr[2]) if len(rr) > 2 else ""
-            st = rr[5] if len(rr) > 5 else ""
-            msg = rr[1] if len(rr) > 1 else ""
-            try:
-                rd = datetime.strptime(ds, "%Y-%m-%d").date()
-            except:
-                continue
-            if not (week_start <= rd <= today):
-                continue
-            dn = DAY_SHORT[rd.weekday()]
-            if st == "done":
-                done_c += 1
-                day_done[dn] = day_done.get(dn, 0) + 1
-                done_list.append(f"\u2705 {msg} \u00b7 {fmt_date(ds)}")
-            elif st == "missed":
-                missed_c += 1
-                day_missed[dn] = day_missed.get(dn, 0) + 1
-                missed_list.append(f"\u2717 {msg} \u00b7 {fmt_date(ds)}")
-        total = done_c + missed_c
-        if total == 0:
-            continue
-        pct = int(done_c / total * 100) if total else 0
-        best_day = max(day_done, key=day_done.get) if day_done else "\u2014"
-        worst_day = max(day_missed, key=day_missed.get) if day_missed else "\u2014"
-        streak = 0
-        for i in range(7):
-            d = today - timedelta(days=i)
-            dn = DAY_SHORT[d.weekday()]
-            if day_missed.get(dn, 0) == 0 and day_done.get(dn, 0) > 0:
-                streak += 1
-            else:
-                break
-        if pct >= 90:
-            mood = "Outstanding! \U0001f3c6"
-        elif pct >= 70:
-            mood = "Keep it up! \U0001f4aa"
-        elif pct >= 50:
-            mood = "Room to improve \U0001f4c8"
+        lines = [f"☀️ Good morning!\n{hdr('Today ' + today_fmt)}", ""]
+        if items:
+            for t, m in sorted(items):
+                lines.append(f"  {fmt_time(t)} · {m}")
+            lines.append(f"\n{len(items)} reminder{'s' if len(items)!=1 else ''} today")
         else:
-            mood = "Let's do better next week \U0001f3af"
-        ws = week_start.strftime("%-d %b")
-        te = today.strftime("%-d %b")
-        lines = [f"\U0001f4ca Weekly Report\n{hdr(f'{ws} \u2014 {te}')}", "",
-                 f"\u2705 Completed: {done_c}/{total} ({pct}%)",
-                 f"\u274c Missed: {missed_c}",
-                 f"\u23ed Snoozed: {snoozed_c} times", "",
-                 f"\U0001f4c5 Most Productive: {best_day}",
-                 f"\U0001f4c9 Most Missed: {worst_day}", "",
-                 f"\U0001f525 Streak: {streak} day{'s' if streak != 1 else ''} without missing!", "",
-                 mood]
-        txt = "\n".join(lines)
-        row_num = None
-        for idx, rr in enumerate(rem_rows[1:], start=2):
-            if rr and rr[0] == uid_s:
-                row_num = idx
-                break
-        btns = [[IKB("\U0001f4cb Details", callback_data=f"wrdet_{uid_s}")]]
-        ctx.bot_data[f"wr_done_{uid_s}"] = done_list[-10:]
-        ctx.bot_data[f"wr_miss_{uid_s}"] = missed_list[-10:]
-        try:
-            await ctx.bot.send_message(chat_id=int(uid_s), text=txt, parse_mode="HTML", reply_markup=IKM(btns))
-        except:
-            pass
+            lines.append("<i>No reminders today. Enjoy your day!</i>")
+        text = "\n".join(lines)
+        try: await ctx.bot.send_message(chat_id=int(uid_s), text=text, reply_markup=home_kb(), parse_mode="HTML")
+        except: pass
 
-# ============= MAIN =============
+# ========== WEEKLY REPORT ==========
+async def check_weekly_report(ctx: ContextTypes.DEFAULT_TYPE):
+    try: all_cfg = cfg_sheet.get_all_values()
+    except: return
+    for cr in all_cfg[1:]:
+        if not cr or len(cr) < 8: continue
+        if cr[7] != "true": continue
+        uid_s = cr[0]
+        tz_name = cr[5] if len(cr) > 5 and cr[5] else DEF_TZ
+        tz = safe_tz(tz_name); now = datetime.now(tz)
+        if now.weekday() != 6 or now.strftime("%H:%M") != "09:00": continue
+        week_end = now.date(); week_start = week_end - timedelta(days=6)
+        rows = sheet.get_all_values()
+        done_c = 0; missed_c = 0; snooze_c = 0
+        day_done = {}; day_missed = {}
+        done_items = []; missed_items = []
+        for r in rows[1:]:
+            if str(r[0]) != uid_s: continue
+            if len(r) < 6: continue
+            d = norm_date(r[2])
+            try: rd = datetime.strptime(d, "%Y-%m-%d").date()
+            except: continue
+            if not (week_start <= rd <= week_end): continue
+            m = r[1] if len(r) > 1 else "?"; t = norm_time(r[3]) if len(r) > 3 else ""
+            if r[5] == "done":
+                done_c += 1; wd = rd.strftime("%A")
+                day_done[wd] = day_done.get(wd, 0) + 1
+                done_items.append(f"  ✅ {fmt_time(t)} · {m}")
+            elif r[5] == "missed":
+                missed_c += 1; wd = rd.strftime("%A")
+                day_missed[wd] = day_missed.get(wd, 0) + 1
+                missed_items.append(f"  ✗ {fmt_time(t)} · {m}")
+        total = done_c + missed_c
+        if total == 0: continue
+        pct = int(done_c / total * 100) if total > 0 else 0
+        best_day = max(day_done, key=day_done.get) if day_done else "—"
+        worst_day = max(day_missed, key=day_missed.get) if day_missed else "—"
+        streak = 0
+        for i in range(6, -1, -1):
+            dd = week_end - timedelta(days=i)
+            wd = dd.strftime("%A")
+            if day_missed.get(wd, 0) == 0 and day_done.get(wd, 0) > 0: streak += 1
+            else: break
+        if pct >= 90: mood = "Outstanding! 🏆"
+        elif pct >= 70: mood = "Keep it up! 💪"
+        elif pct >= 50: mood = "Room to improve 📈"
+        else: mood = "Let's do better next week 🎯"
+        ws = week_start.strftime("%-d %b"); we = week_end.strftime("%-d %b")
+        lines = [hdr("📊 Weekly Report"), f"{ws} — {we}", "",
+                 f"✅ Completed: {done_c}/{total} ({pct}%)",
+                 f"❌ Missed: {missed_c}"]
+        if streak: lines.append(f"🔥 Streak: {streak} days without missing!")
+        lines.extend(["", f"📅 Most Productive: {best_day}"])
+        if worst_day != "—": lines.append(f"📉 Most Missed: {worst_day}")
+        lines.extend(["", mood])
+        text = "\n".join(lines)
+        detail_text = text
+        if done_items:
+            detail_text += "\n\n<b>Completed:</b>\n" + "\n".join(done_items[:10])
+        if missed_items:
+            detail_text += "\n\n<b>Missed:</b>\n" + "\n".join(missed_items[:10])
+        try:
+            msg = await ctx.bot.send_message(chat_id=int(uid_s), text=text, reply_markup=IKM([[IKB("📋 Details", callback_data=f"wrdet_{msg.message_id}")]]), parse_mode="HTML")
+            ctx.bot_data[f"wrdet_{msg.message_id}"] = detail_text
+            ctx.bot_data[f"wrsum_{msg.message_id}"] = text
+        except: pass
+
+# ========== MAIN ==========
 async def post_init(app):
-    private_cmds = [
+    await app.bot.set_my_commands([
         BotCommand("add", "New reminder"),
         BotCommand("list", "All reminders"),
         BotCommand("month", "Monthly schedule"),
         BotCommand("settings", "Bot settings"),
-        BotCommand("info", "About this bot")
-    ]
-    group_cmds = [
+        BotCommand("info", "About this bot"),
+    ], scope={"type":"all_private_chats"})
+    await app.bot.set_my_commands([
         BotCommand("start", "Bot info & commands"),
         BotCommand("remind", "Group reminder"),
-        BotCommand("list", "Active reminders")
-    ]
-    await app.bot.set_my_commands(private_cmds, scope={"type": "all_private_chats"})
-    await app.bot.set_my_commands(group_cmds, scope={"type": "all_group_chats"})
+        BotCommand("list", "Active reminders"),
+    ], scope={"type":"all_group_chats"})
 
 def main():
-    app = Application.builder().token(TOKEN).job_queue(JobQueue()).post_init(post_init).build()
-    for cmd, fn in [("start", start), ("add", add_cmd), ("list", list_cmd),
-                    ("info", info_cmd), ("settings", settings_cmd), ("month", month_cmd), ("remind", remind_cmd)]:
-        app.add_handler(CommandHandler(cmd, fn))
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add_cmd))
+    app.add_handler(CommandHandler("list", list_cmd))
+    app.add_handler(CommandHandler("month", month_cmd))
+    app.add_handler(CommandHandler("settings", settings_cmd))
+    app.add_handler(CommandHandler("info", info_cmd))
+    app.add_handler(CommandHandler("remind", remind_cmd))
     app.add_handler(CallbackQueryHandler(on_btn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.job_queue.run_repeating(check_reminders, interval=60, first=0)
     app.job_queue.run_repeating(check_digest, interval=60, first=30)
     app.job_queue.run_repeating(check_weekly_report, interval=60, first=45)
-    log.info("\U0001f680 Smart Reminder Bot Running")
+    print("🚀 Bot Running")
     app.run_polling()
 
 if __name__ == "__main__":
