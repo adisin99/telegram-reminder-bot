@@ -561,42 +561,7 @@ return InlineKeyboardMarkup(kb)
 ============= PARSERS ====================
 def parse_time(text):
 s = text.strip()
-for pat, mode in [(r'^(\d{1,2})[:.]\s*(\d{1,2})\s*(am|pm)
-′
-,
-′
-h
-m
-a
-′
-)
-,
-(
-r
-′
-(
-\d
-1
-,
-2
-)
-\s
-∗
-(
-a
-m
-∣
-p
-m
-)
-′
- , 
-′
- hma 
-′
- ),(r 
-′(
- \d1,2)\s∗(am∣pm)', 'ha'), (r'^(\d{1,2})[:.]\s*(\d{1,2})$', '24')]:
+for pat, mode in [(r'^(\d{1,2})[:.]\s*(\d{1,2})\s*(am|pm)′,′hma′),(r′(\d1,2)\s∗(am∣pm)′, ′hma ′),(r ′(\d1,2)\s∗(am∣pm)', 'ha'), (r'^(\d{1,2})[:.]\s*(\d{1,2})$', '24')]:
 m = re.match(pat, s, re.I)
 if not m: continue
 if mode == 'hma': h, mi, ap = int(m.group(1)), int(m.group(2)), m.group(3).lower()
