@@ -32,8 +32,9 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ================= CONFIG =================
-TOKEN = "8235103406:AAFYJ2SNRW4A4AAEyz8t2h-5BeYk8rnzzwE"
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs/edit?pli=1&gid=0#gid=0"
+TOKEN = os.environ.get("BOT_TOKEN")
+SHEET_URL = os.environ.get("SHEET_URL")
+creds_json = os.environ.get("GOOGLE_CREDS")
 
 DIV = "━━━━━━━━━━━━━━━━━━━━"
 AUTO_MIN_SEC = 180  # 3 minutes
@@ -87,7 +88,10 @@ logger = logging.getLogger(__name__)
 
 # ============= GOOGLE SHEET ==============
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds_json = os.environ.get("GOOGLE_CREDS")
+if not TOKEN:
+    raise Exception("TOKEN missing")
+if not SHEET_URL:
+    raise Exception("SHEET_URL missing")
 if not creds_json:
     raise Exception("GOOGLE_CREDS missing")
 credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(creds_json), scope)
