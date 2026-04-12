@@ -2663,6 +2663,19 @@ async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
                 gap = cfg_map.get(uid_s, {"retry_gap": DEF_RETRY_GAP})["retry_gap"]
                 ctx.job_queue.run_once(auto_retry, gap * 60, data={"row": idx, "chat": uid}, name=f"retry-{idx}")
 
+# ============= For Uptime Trigger ======================
+from flask import Flask
+import threading
+
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def home():
+    return "Bot is alive!"
+
+def run_web():
+    app_flask.run(host="0.0.0.0", port=10000)
+
 # ============= MAIN ======================
 def main():
     app = Application.builder().token(TOKEN).job_queue(JobQueue()).post_init(post_init).build()
@@ -2674,6 +2687,7 @@ def main():
     app.job_queue.run_repeating(check_digest, interval=60, first=10)
     app.job_queue.run_repeating(check_weekly_report, interval=60, first=20)
     print("RemindX Bot Running")
+    threading.Thread(target=run_web).start()
     app.run_polling()
 
 if __name__ == "__main__":
