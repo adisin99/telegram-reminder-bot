@@ -609,7 +609,7 @@ def saved_kb(row, rep):
     btns = []
     if r == "none" or not r:
         btns.append(InlineKeyboardButton("🔁 Repeat", callback_data=f"chrep_{row}"))
-    btns.append(InlineKeyboardButton("✎ Edit", callback_data=f"edit_saved_{row}"))  # Changed
+    btns.append(InlineKeyboardButton("✎ Edit", callback_data=f"edit_saved_{row}"))  # CHANGED
     return InlineKeyboardMarkup([btns, [InlineKeyboardButton("＋ New", callback_data="add")]])
 
 def gjoin_kb(tid, show_rep=False):
@@ -1808,7 +1808,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith(("view_", "snzp_", "snzb_", "snz_", "done_", "crem_", "undo_")):
         await _btn_rem(q, ctx, ud, uid, data)
         return
-    if data.startswith(("edit_", "emsg_", "edate_", "etime_")):
+    if data.startswith(("edit_", "emsg_", "edate_", "etime_", "back_saved_")):
         await _btn_edit(q, ud, uid, data)
         return
     if data.startswith(("cfg_", "cfgr_", "cfgg_", "tzr_", "tzs_", "gunsub_")):
@@ -2051,17 +2051,18 @@ async def _btn_rem(q, ctx, ud, uid, data):
         await safe_edit(q.message, f"{hdr('Restored ✓')}\n{detail(msg, ds, ts, rs)}", new_kb())
         save_home(ud, q.message)
 
-async def _btn_edit(q, ud, uid, data):
-   if data.startswith("emsg_"):
+async def _btn_edit(q, ctx, ud, uid, data):
+    if data.startswith("emsg_"):
         row = int(data[5:])
-        context = ud.get("edit_context", "list")  # Preserve context
+        context = ud.get("edit_context", "list")
         ud["editing_row"], ud["step"], ud["edit_context"] = row, "edit_message", context
         r, msg, ds, ts, rs = row_detail(row)
         back_cb = f"edit_saved_{row}" if context == "saved" else f"edit_{row}"
-        await safe_edit(q.message, f"{hdr('Edit Reminder')}\nCurrent: {msg}\n{fmt_date(ds)} · {fmt_time(ts)} · {rs}\n\nEnter new message:",
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\nCurrent: <i>{msg}</i>\n{fmt_date(ds)} · {fmt_time(ts)} · {rs}\n\nEnter new message:",
                         InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]))
         save_p(ud, q.message)
-   elif data.startswith("edate_"):
+    
+    elif data.startswith("edate_"):
         row = int(data[6:])
         context = ud.get("edit_context", "list")
         ud["editing_row"], ud["step"], ud["edit_context"] = row, "edit_date", context
@@ -2069,7 +2070,7 @@ async def _btn_edit(q, ud, uid, data):
         utz = get_tz(uid)
         now = datetime.now(utz)
         back_cb = f"edit_saved_{row}" if context == "saved" else f"edit_{row}"
-        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: {fmt_date(ds)} · {fmt_time(ts)}\n\nPick new date:",
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nPick new date:",
                         cal_kb(now.year, now.month, back_cb, "« Back", tz=utz))
     
     elif data.startswith("etime_"):
@@ -2078,22 +2079,10 @@ async def _btn_edit(q, ud, uid, data):
         ud["editing_row"], ud["step"], ud["edit_context"] = row, "edit_time", context
         r, msg, ds, ts, rs = row_detail(row)
         back_cb = f"edit_saved_{row}" if context == "saved" else f"edit_{row}"
-        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: {fmt_date(ds)} · {fmt_time(ts)}\n\nEnter new time:\ne.g. 9pm, 9:30 PM, 21:30",
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nEnter new time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
                         InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]))
         save_p(ud, q.message)
-    elif data.startswith("edit_saved_"):
-    row = int(data[11:])
-    ud.clear()
-    ud["edit_context"] = "saved"
-    r, msg, ds, ts, rs = row_detail(row)
-    await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rs)}\n\nWhat to change?",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), 
-                         InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
-                         InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
-                        [InlineKeyboardButton("« Back", callback_data=f"back_saved_{row}")],
-                    ]))
-
+    
     elif data.startswith("back_saved_"):
         row = int(data[11:])
         ud.clear()
@@ -2103,18 +2092,33 @@ async def _btn_edit(q, ud, uid, data):
         kb = saved_kb(row, rep)
         await safe_edit(q.message, txt, kb)
         save_home(ud, q.message)
-
-    elif data.startswith("edit_"):
-    row = int(data[5:])
-    ud.clear()
-    ud["edit_context"] = "list"  # Add this line
-    r, msg, ds, ts, rs = row_detail(row)
+    
+    elif data.startswith("edit_saved_"):
+        row = int(data[11:])
+        ud.clear()
+        ud["edit_context"] = "saved"
+        r, msg, ds, ts, rs = row_detail(row)
         await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rs)}\n\nWhat to change?",
                         InlineKeyboardMarkup([
-                            [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
+                            [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), 
+                             InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
+                             InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
+                            [InlineKeyboardButton("« Back", callback_data=f"back_saved_{row}")],
+                        ]))
+    
+    elif data.startswith("edit_"):
+        row = int(data[5:])
+        ud.clear()
+        ud["edit_context"] = "list"
+        r, msg, ds, ts, rs = row_detail(row)
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rs)}\n\nWhat to change?",
+                        InlineKeyboardMarkup([
+                            [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), 
+                             InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
                              InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
                             [InlineKeyboardButton("« Back", callback_data=f"view_{row}")],
                         ]))
+   
 
 async def _btn_cfg(q, ctx, ud, uid, data):
     if data == "cfg_digest_toggle":
