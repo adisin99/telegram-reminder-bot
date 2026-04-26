@@ -1264,17 +1264,14 @@ def build_month_view(uid, year, month, utz, ctx=None):
     num_row = []
     for i in range(len(weeks)):
         num_row.append(InlineKeyboardButton(str(i + 1), callback_data=f"mw_{year}_{month:02d}_{i}"))
-        if len(num_row) == 2:
-            btns.append(num_row)
-            num_row = []
     if num_row:
-        btns.append(num_row)
-
+        btns.append(num_row)  # All 4 buttons in one row
+    
     pm, py = ((month - 2) % 12) + 1, year - (1 if month == 1 else 0)
     nm, ny = (month % 12) + 1, year + (1 if month == 12 else 0)
     btns.append([InlineKeyboardButton("‹", callback_data=f"mn_{py}_{pm:02d}"), InlineKeyboardButton("›", callback_data=f"mn_{ny}_{nm:02d}")])
     btns.append([InlineKeyboardButton("— Close", callback_data=f"pclose_pshow_month_{year}_{month:02d}")])
-
+    
     return "\n".join(lines), InlineKeyboardMarkup(btns)
 
 def build_week_view(uid, year, month, week_idx, utz):
@@ -1538,6 +1535,14 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         return
 
+    if data.startswith("saved_"):
+        row = int(data[6:])
+        r, msg, ds, ts, rs = row_detail(row)
+        rep = r[4] if len(r) > 4 else "none"
+        await safe_edit(q.message, f"{hdr('Saved ✓')}\n{detail(msg, ds, ts, fmt_rep(rep))}", saved_kb(row, rep))
+        save_home(ctx.user_data, q.message)
+        return
+    
     if update.effective_chat.type == "private":
         update_username(uid, get_username(q.from_user))
 
@@ -2085,7 +2090,7 @@ async def _btn_edit(q, ud, uid, data):
                         InlineKeyboardMarkup([
                             [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
                              InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
-                            [InlineKeyboardButton("« Back", callback_data=f"view_{row}")],
+                            [InlineKeyboardButton("« Back", callback_data=f"saved_{row}")],  # Changed from view_{row} to saved_{row}
                         ]))
 
 async def _btn_cfg(q, ctx, ud, uid, data):
