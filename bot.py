@@ -2051,7 +2051,7 @@ async def _btn_rem(q, ctx, ud, uid, data):
         await safe_edit(q.message, f"{hdr('Restored ✓')}\n{detail(msg, ds, ts, rs)}", new_kb())
         save_home(ud, q.message)
 
-async def _btn_edit(q, ctx, ud, uid, data):
+async def _btn_edit(q, ud, uid, data):
     if data.startswith("emsg_"):
         row = int(data[5:])
         context = ud.get("edit_context", "list")
