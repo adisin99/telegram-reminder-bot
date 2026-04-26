@@ -2147,7 +2147,7 @@ async def _btn_edit(q, ud, uid, data):
         await safe_edit(q.message, txt, kb)
         save_home(ud, q.message)
     
-     elif data.startswith("edit_saved_"):
+    elif data.startswith("edit_saved_"):
         row = int(data[11:])
         ud.clear()
         ud["edit_context"] = "saved"
