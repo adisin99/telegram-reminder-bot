@@ -618,12 +618,18 @@ def gjoin_kb(tid, show_rep=False):
         btns.append([InlineKeyboardButton("🔁 Repeat", callback_data=f"gchrep_{tid}")])
     return InlineKeyboardMarkup(btns)
 
-def rep_picker_kb(prefix):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Daily", callback_data=f"{prefix}_daily"), InlineKeyboardButton("Weekly", callback_data=f"{prefix}_weekly")],
-        [InlineKeyboardButton("Monthly", callback_data=f"{prefix}_monthly"), InlineKeyboardButton("Customize", callback_data=f"{prefix}_custom")],
-    ])
-
+def rep_picker_kb(prefix, back_cb=None):
+    btns = [
+        [InlineKeyboardButton("Daily", callback_data=f"{prefix}_daily"), 
+         InlineKeyboardButton("Weekly", callback_data=f"{prefix}_weekly"),
+         InlineKeyboardButton("Monthly", callback_data=f"{prefix}_monthly")],
+    ]
+    second_row = [InlineKeyboardButton("Customize", callback_data=f"{prefix}_custom")]
+    if back_cb:
+        second_row.append(InlineKeyboardButton("« Back", callback_data=back_cb))
+    btns.append(second_row)
+    return InlineKeyboardMarkup(btns)
+    
 def custom_days_kb(selected, prefix):
     row1, row2 = [], []
     for i, (name, key) in enumerate(zip(DAY_NAMES, DAY_KEYS)):
@@ -1655,8 +1661,16 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("chrep_"):
         row = int(data[6:])
         r, msg, ds, ts, rs = row_detail(row)
-        await safe_edit(q.message, f"{hdr('Saved ✓')}\n{detail(msg, ds, ts)}\n\nRepeat?", rep_picker_kb(f"chrepv_{row}"))
+        await safe_edit(q.message, f"{hdr('Saved ✓')}\n{detail(msg, ds, ts)}\n\nRepeat?", 
+                        rep_picker_kb(f"chrepv_{row}", f"backsaved_{row}"))
         return
+    if data.startswith("backsaved_"):
+        row = int(data[10:])
+        r, msg, ds, ts, rs = row_detail(row)
+        await safe_edit(q.message, f"{hdr('Saved ✓')}\n{detail(msg, ds, ts, rs)}", 
+                        saved_kb(row, r[4] if len(r) > 4 else "none"))
+        return
+    
     if data.startswith("chrepv_"):
         parts = data.split("_")
         row_s, rep = parts[1], parts[2]
@@ -1666,6 +1680,23 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ud["custom_days_selected"] = []
             r, msg, ds, ts, rs = row_detail(row)
             await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nSelect days:", custom_days_kb([], f"chrep_{row}"))
+            return
+        r, msg, ds, ts, rs = row_detail(row)
+        sheet.update_cell(row, 5, rep)
+        await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep))}", new_kb())
+        save_home(ud, q.message)
+        return
+
+    if data.startswith("erepv_"):
+        parts = data.split("_")
+        row_s, rep = parts[1], parts[2]
+        row = int(row_s)
+        if rep == "custom":
+            ud["custom_days_for"] = ("erep", row)
+            ud["custom_days_selected"] = []
+            r, msg, ds, ts, rs = row_detail(row)
+            await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nSelect days:", 
+                            custom_days_kb([], f"erep_{row}"))
             return
         r, msg, ds, ts, rs = row_detail(row)
         sheet.update_cell(row, 5, rep)
@@ -1755,6 +1786,12 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             sheet.update_cell(row, 5, rep_value)
             await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep_value))}", new_kb())
             save_home(ud, q.message)
+        elif kind == "erep":
+            row = int(key)
+            r, msg, ds, ts, rs = row_detail(row)
+            sheet.update_cell(row, 5, rep_value)
+            await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep_value))}", new_kb())
+            save_home(ud, q.message)
         elif kind == "gchrep":
             row, r = find_by_tid(key)
             if r:
@@ -1764,7 +1801,6 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await safe_edit(q.message, f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, fmt_rep(rep_value))}\n\n{sub_info}", gjoin_kb(key))
                 ctx.bot_data[f"gm_{key}"] = {"c": str(q.message.chat.id), "m": q.message.message_id}
         return
-
     if data.startswith("cdayback_"):
         info = ud.get("custom_days_for")
         ud.pop("custom_days_for", None)
@@ -1774,12 +1810,21 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if kind == "chrep":
                 row = int(key)
                 r, msg, ds, ts, rs = row_detail(row)
-                await safe_edit(q.message, f"{hdr('Saved ✓')}\n{detail(msg, ds, ts)}\n\nRepeat?", rep_picker_kb(f"chrepv_{row}"))
+                await safe_edit(q.message, f"{hdr('Saved ✓')}\n{detail(msg, ds, ts)}\n\nRepeat?", 
+                                rep_picker_kb(f"chrepv_{row}", f"backsaved_{row}"))
+            elif kind == "erep":
+                row = int(key)
+                context = ud.get("edit_context", "list")
+                r, msg, ds, ts, rs = row_detail(row)
+                back_cb = f"edit_saved_{row}" if context == "saved" else f"edit_{row}"
+                await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rs)}\n\nRepeat?",
+                                rep_picker_kb(f"erepv_{row}", back_cb))
             elif kind == "gchrep":
                 row, r = find_by_tid(key)
                 if r:
                     msg, ds, ts, _ = get_detail(r)
-                    await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nRepeat?", rep_picker_kb(f"gchrepv_{key}"))
+                    await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nRepeat?", 
+                                    rep_picker_kb(f"gchrepv_{key}"))
         return
 
     # Month view callbacks
@@ -1808,7 +1853,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith(("view_", "snzp_", "snzb_", "snz_", "done_", "crem_", "undo_")):
         await _btn_rem(q, ctx, ud, uid, data)
         return
-    if data.startswith(("edit_", "emsg_", "edate_", "etime_", "back_saved_")):
+    if data.startswith(("edit_", "emsg_", "edate_", "etime_", "erep_", "back_saved_")):
         await _btn_edit(q, ud, uid, data)
         return
     if data.startswith(("cfg_", "cfgr_", "cfgg_", "tzr_", "tzs_", "gunsub_")):
@@ -2082,6 +2127,15 @@ async def _btn_edit(q, ud, uid, data):
         await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nEnter new time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
                         InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]))
         save_p(ud, q.message)
+
+    elif data.startswith("erep_"):
+        row = int(data[5:])
+        context = ud.get("edit_context", "list")
+        ud["editing_row"], ud["edit_context"] = row, context
+        r, msg, ds, ts, rs = row_detail(row)
+        back_cb = f"edit_saved_{row}" if context == "saved" else f"edit_{row}"
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rs)}\n\nRepeat?",
+                        rep_picker_kb(f"erepv_{row}", back_cb))
     
     elif data.startswith("back_saved_"):
         row = int(data[11:])
@@ -2093,7 +2147,7 @@ async def _btn_edit(q, ud, uid, data):
         await safe_edit(q.message, txt, kb)
         save_home(ud, q.message)
     
-    elif data.startswith("edit_saved_"):
+        elif data.startswith("edit_saved_"):
         row = int(data[11:])
         ud.clear()
         ud["edit_context"] = "saved"
@@ -2102,11 +2156,12 @@ async def _btn_edit(q, ud, uid, data):
                         InlineKeyboardMarkup([
                             [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), 
                              InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
-                             InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
+                             InlineKeyboardButton("Time", callback_data=f"etime_{row}"),
+                             InlineKeyboardButton("Repeat", callback_data=f"erep_{row}")],
                             [InlineKeyboardButton("« Back", callback_data=f"back_saved_{row}")],
                         ]))
     
-    elif data.startswith("edit_"):
+        elif data.startswith("edit_"):
         row = int(data[5:])
         ud.clear()
         ud["edit_context"] = "list"
@@ -2115,7 +2170,8 @@ async def _btn_edit(q, ud, uid, data):
                         InlineKeyboardMarkup([
                             [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), 
                              InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
-                             InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
+                             InlineKeyboardButton("Time", callback_data=f"etime_{row}"),
+                             InlineKeyboardButton("Repeat", callback_data=f"erep_{row}")],
                             [InlineKeyboardButton("« Back", callback_data=f"view_{row}")],
                         ]))
    
