@@ -2161,7 +2161,7 @@ async def _btn_edit(q, ud, uid, data):
                             [InlineKeyboardButton("« Back", callback_data=f"back_saved_{row}")],
                         ]))
     
-        elif data.startswith("edit_"):
+    elif data.startswith("edit_"):
         row = int(data[5:])
         ud.clear()
         ud["edit_context"] = "list"
