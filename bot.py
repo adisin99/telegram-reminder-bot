@@ -609,7 +609,7 @@ def saved_kb(row, rep):
     btns = []
     if r == "none" or not r:
         btns.append(InlineKeyboardButton("🔁 Repeat", callback_data=f"chrep_{row}"))
-    btns.append(InlineKeyboardButton("✎ Edit", callback_data=f"edit_{row}"))
+    btns.append(InlineKeyboardButton("✎ Edit", callback_data=f"edit_saved_{row}"))  # Changed
     return InlineKeyboardMarkup([btns, [InlineKeyboardButton("＋ New", callback_data="add")]])
 
 def gjoin_kb(tid, show_rep=False):
@@ -1228,6 +1228,7 @@ def build_month_view(uid, year, month, utz, ctx=None):
 
     # Merge into 4 if more
     while len(weeks) > 4 and len(weeks) >= 2:
+        # Merge last two
         w1 = weeks[-2]
         w2 = weeks[-1]
         weeks[-2] = {"start": w1["start"], "end": w2["end"], "count": w1["count"] + w2["count"]}
@@ -1258,12 +1259,13 @@ def build_month_view(uid, year, month, utz, ctx=None):
         if parts:
             lines.append(" · ".join(parts))
 
-    # ── FIX: All week buttons in ONE single row ──
-    week_btns_row = [
-        InlineKeyboardButton(str(i + 1), callback_data=f"mw_{year}_{month:02d}_{i}")
-        for i in range(len(weeks))
-    ]
-    btns = [week_btns_row]
+    # Week buttons — 2 per row
+    btns = []
+    num_row = []
+    for i in range(len(weeks)):
+        num_row.append(InlineKeyboardButton(str(i + 1), callback_data=f"mw_{year}_{month:02d}_{i}"))
+    if num_row:
+        btns.append(num_row)
 
     pm, py = ((month - 2) % 12) + 1, year - (1 if month == 1 else 0)
     nm, ny = (month % 12) + 1, year + (1 if month == 12 else 0)
@@ -1556,7 +1558,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await safe_edit(q.message, "<b>RemindX</b>", gmin_kb(f"gshow_generic_{mid}"))
         return
 
-    # Private close → MINIMIZE
+    # Private close → MINIMIZE (does NOT auto-minimize confirmations)
     if data.startswith("pclose_"):
         show_cb = data[7:]
         if show_cb == "pshow_list":
@@ -2049,63 +2051,70 @@ async def _btn_rem(q, ctx, ud, uid, data):
         await safe_edit(q.message, f"{hdr('Restored ✓')}\n{detail(msg, ds, ts, rs)}", new_kb())
         save_home(ud, q.message)
 
-# ── FIX: Back from edit sub-steps goes to saved reminder card, not edit menu ──
 async def _btn_edit(q, ud, uid, data):
-    if data.startswith("emsg_"):
+   if data.startswith("emsg_"):
         row = int(data[5:])
-        ud["editing_row"], ud["step"] = row, "edit_message"
+        context = ud.get("edit_context", "list")  # Preserve context
+        ud["editing_row"], ud["step"], ud["edit_context"] = row, "edit_message", context
         r, msg, ds, ts, rs = row_detail(row)
-        await safe_edit(q.message,
-            f"{hdr('Edit Reminder')}\nCurrent: <i>{msg}</i>\n{fmt_date(ds)} · {fmt_time(ts)} · {rs}\n\nEnter new message:",
-            # Back goes directly to the saved reminder card
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"savedview_{row}")]]))
+        back_cb = f"edit_saved_{row}" if context == "saved" else f"edit_{row}"
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\nCurrent: {msg}\n{fmt_date(ds)} · {fmt_time(ts)} · {rs}\n\nEnter new message:",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]))
         save_p(ud, q.message)
-
-    elif data.startswith("edate_"):
+   elif data.startswith("edate_"):
         row = int(data[6:])
-        ud["editing_row"], ud["step"] = row, "edit_date"
+        context = ud.get("edit_context", "list")
+        ud["editing_row"], ud["step"], ud["edit_context"] = row, "edit_date", context
         r, msg, ds, ts, rs = row_detail(row)
         utz = get_tz(uid)
         now = datetime.now(utz)
-        await safe_edit(q.message,
-            f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nPick new date:",
-            # Back goes directly to the saved reminder card
-            cal_kb(now.year, now.month, f"savedview_{row}", "« Back", tz=utz))
-
+        back_cb = f"edit_saved_{row}" if context == "saved" else f"edit_{row}"
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: {fmt_date(ds)} · {fmt_time(ts)}\n\nPick new date:",
+                        cal_kb(now.year, now.month, back_cb, "« Back", tz=utz))
+    
     elif data.startswith("etime_"):
         row = int(data[6:])
-        ud["editing_row"], ud["step"] = row, "edit_time"
+        context = ud.get("edit_context", "list")
+        ud["editing_row"], ud["step"], ud["edit_context"] = row, "edit_time", context
         r, msg, ds, ts, rs = row_detail(row)
-        await safe_edit(q.message,
-            f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nEnter new time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
-            # Back goes directly to the saved reminder card
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"savedview_{row}")]]))
+        back_cb = f"edit_saved_{row}" if context == "saved" else f"edit_{row}"
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: {fmt_date(ds)} · {fmt_time(ts)}\n\nEnter new time:\ne.g. 9pm, 9:30 PM, 21:30",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]))
         save_p(ud, q.message)
+    elif data.startswith("edit_saved_"):
+    row = int(data[11:])
+    ud.clear()
+    ud["edit_context"] = "saved"
+    r, msg, ds, ts, rs = row_detail(row)
+    await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rs)}\n\nWhat to change?",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), 
+                         InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
+                         InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
+                        [InlineKeyboardButton("« Back", callback_data=f"back_saved_{row}")],
+                    ]))
 
-    elif data.startswith("edit_"):
-        row = int(data[5:])
+    elif data.startswith("back_saved_"):
+        row = int(data[11:])
         ud.clear()
         r, msg, ds, ts, rs = row_detail(row)
-        await safe_edit(q.message,
-            f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rs)}\n\nWhat to change?",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"),
-                 InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
-                 InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
-                # Back from edit menu goes to saved reminder card
-                [InlineKeyboardButton("« Back", callback_data=f"savedview_{row}")],
-            ]))
-
-    elif data.startswith("savedview_"):
-        # ── Renders the saved reminder card (Saved ✓) without entering edit flow ──
-        row = int(data[10:])
-        ud.clear()
-        r, msg, ds, ts, rs = row_detail(row)
-        rep_raw = r[4] if len(r) > 4 else "none"
-        txt = f"{hdr('Saved ✓')}\n{detail(msg, ds, ts, fmt_rep(rep_raw))}"
-        kb = saved_kb(row, rep_raw)
+        txt = f"{hdr('Saved ✓')}\n{detail(msg, ds, ts, rs)}"
+        rep = r[4] if len(r) > 4 else "none"
+        kb = saved_kb(row, rep)
         await safe_edit(q.message, txt, kb)
         save_home(ud, q.message)
+
+    elif data.startswith("edit_"):
+    row = int(data[5:])
+    ud.clear()
+    ud["edit_context"] = "list"  # Add this line
+    r, msg, ds, ts, rs = row_detail(row)
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rs)}\n\nWhat to change?",
+                        InlineKeyboardMarkup([
+                            [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
+                             InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
+                            [InlineKeyboardButton("« Back", callback_data=f"view_{row}")],
+                        ]))
 
 async def _btn_cfg(q, ctx, ud, uid, data):
     if data == "cfg_digest_toggle":
