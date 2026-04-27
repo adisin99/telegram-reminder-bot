@@ -1662,7 +1662,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         row = int(data[6:])
         r, msg, ds, ts, rs = row_detail(row)
         await safe_edit(q.message, f"{hdr('Saved ✓')}\n{detail(msg, ds, ts)}\n\nRepeat?", 
-                        rep_picker_kb(f"chrepv_{row}", f"backsaved_{row}"))
+                        rep_picker_kb(f"chrepv_{row}", f"back_saved_{row}"))
         return
     if data.startswith("backsaved_"):
         row = int(data[10:])
