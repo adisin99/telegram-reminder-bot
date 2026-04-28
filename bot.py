@@ -543,6 +543,20 @@ async def rm_home(ctx, ud):
         except Exception:
             pass
 
+async def clear_saved_btns(ctx, uid):
+    """Remove buttons from last 'Saved ✓' message before sending new message"""
+    key = f"saved_msg_{uid}"
+    saved = ctx.bot_data.pop(key, None)
+    if saved:
+        try:
+            await ctx.bot.edit_message_reply_markup(
+                chat_id=saved["c"], 
+                message_id=saved["m"], 
+                reply_markup=None
+            )
+        except Exception:
+            pass
+
 def save_home(ud, msg):
     ud["h_mid"], ud["h_cid"] = msg.message_id, msg.chat.id
 
@@ -1348,7 +1362,7 @@ def build_week_view(uid, year, month, week_idx, utz):
     return "\n".join(lines), InlineKeyboardMarkup(btns)
 
 # ============= SAVE FUNCTIONS =============
-async def save_reminder(target, uid, ud, msg, date, time_str, edit_msg=False):
+async def save_reminder(target, uid, ud, msg, date, time_str, edit_msg=False, ctx=None):
     rep = ud.get("repeat", "none")
     sheet.append_row([uid, msg, date, time_str, rep, "active", 0, "", ""], value_input_option="RAW")
     try:
@@ -1361,9 +1375,13 @@ async def save_reminder(target, uid, ud, msg, date, time_str, edit_msg=False):
     if edit_msg:
         await safe_edit(target, txt, kb)
         save_home(ud, target)
+        if ctx:  # ADD THIS BLOCK
+            ctx.bot_data[f"saved_{uid}"] = {"c": target.chat.id, "m": target.message_id}
     else:
         sent = await target.reply_text(txt, reply_markup=kb, parse_mode="HTML")
         save_home(ud, sent)
+        if ctx:  # ADD THIS BLOCK
+            ctx.bot_data[f"saved_{uid}"] = {"c": sent.chat.id, "m": sent.message_id}
 
 async def finish_group_remind(target, ctx, uid, ud, rep, edit_msg=False):
     msg, ds, ts = ud.get("message", ""), ud.get("date", ""), ud.get("time", "")
@@ -2073,7 +2091,6 @@ async def _btn_rem(q, ctx, ud, uid, data):
             return
         kill_jobs(ctx.job_queue, row)
         await rm_btns(ctx, row)
-        await rm_saved_msg(ctx, row)
         if not advance_rep(row, r):
             sheet.update_cell(row, 6, "done")
             sheet.update_cell(row, 7, 0)
@@ -2157,9 +2174,9 @@ async def _btn_edit(q, ud, uid, data):
                         InlineKeyboardMarkup([
                             [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), 
                              InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
-                             InlineKeyboardButton("Time", callback_data=f"etime_{row}"),
-                             InlineKeyboardButton("Repeat", callback_data=f"erep_{row}")],
-                            [InlineKeyboardButton("« Back", callback_data=f"back_saved_{row}")],
+                             InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
+                             [InlineKeyboardButton("Repeat", callback_data=f"erep_{row}"),
+                             InlineKeyboardButton("« Back", callback_data=f"back_saved_{row}")],
                         ]))
     
     elif data.startswith("edit_"):
@@ -2171,9 +2188,9 @@ async def _btn_edit(q, ud, uid, data):
                         InlineKeyboardMarkup([
                             [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), 
                              InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
-                             InlineKeyboardButton("Time", callback_data=f"etime_{row}"),
-                             InlineKeyboardButton("Repeat", callback_data=f"erep_{row}")],
-                            [InlineKeyboardButton("« Back", callback_data=f"view_{row}")],
+                             InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
+                            [InlineKeyboardButton("Repeat", callback_data=f"erep_{row}"),
+                             InlineKeyboardButton("« Back", callback_data=f"view_{row}")],
                         ]))
    
 
@@ -2482,6 +2499,7 @@ async def auto_retry(ctx: ContextTypes.DEFAULT_TYPE):
         return
     await rm_btns(ctx, row)
     nc = count + 1
+    await clear_saved_btns(ctx, uid_int)
     await send_and_track(ctx, chat, f"{str(r[1]).strip()}\n\n<b>Reminder</b> ({nc}/{max_r})", act_kb(row), f"r_{row}", chat)
     sheet.update_cell(row, 7, nc)
     if nc >= max_r:
@@ -2609,6 +2627,7 @@ async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
         else:
             lines = [f"☀️ <b>Good morning!</b>\n{DIV}\n\nToday — {today_str}\n", "No reminders today. Enjoy your day!"]
         try:
+            await clear_saved_btns(ctx, uid_int)
             await ctx.bot.send_message(chat_id=uid_int, text="\n".join(lines), reply_markup=new_kb(), parse_mode="HTML")
         except Exception as e:
             logger.error(f"[DIGEST] {r[0]}: {e}")
@@ -2746,6 +2765,7 @@ async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
         else:
             kill_jobs(ctx.job_queue, idx)
             await rm_btns(ctx, idx)
+            await clear_saved_btns(ctx, uid_int)
             if await send_and_track(ctx, uid, f"{msg}\n\n<b>⏰ Reminder</b>", act_kb(idx), f"r_{idx}", uid):
                 sheet.update_cell(idx, 6, "pending")
                 sheet.update_cell(idx, 7, 0)
