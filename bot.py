@@ -545,11 +545,7 @@ async def rm_home(ctx, ud):
 
 def save_home(ud, msg):
     ud["h_mid"], ud["h_cid"] = msg.message_id, msg.chat.id
-    if ctx and uid:
-        ctx.bot_data[f"saved_home_{uid}"] = {
-            "c": msg.chat.id,
-            "m": msg.message_id
-        }
+
 async def rm_gpm(ctx, tid, uid_s):
     old = ctx.bot_data.pop(f"gpm_{tid}_{uid_s}", None)
     if old:
@@ -1364,10 +1360,12 @@ async def save_reminder(target, uid, ud, msg, date, time_str, edit_msg=False):
     kb = saved_kb(row, rep) if row > 0 else new_kb()
     if edit_msg:
         await safe_edit(target, txt, kb)
-        save_home(ud, target, ctx, uid)
+        save_home(ud, target)
+        return (row, target)  # MODIFIED - now returns tuple
     else:
         sent = await target.reply_text(txt, reply_markup=kb, parse_mode="HTML")
-        save_home(ud, sent, ctx, uid) 
+        save_home(ud, sent)
+        return (row, sent)  # MODIFIED - now returns tuple
 
 async def finish_group_remind(target, ctx, uid, ud, rep, edit_msg=False):
     msg, ds, ts = ud.get("message", ""), ud.get("date", ""), ud.get("time", "")
@@ -1430,7 +1428,9 @@ async def handle_nl_result(target, ctx, uid, ud, msg, ts, ds, utz, is_group=Fals
             if is_group:
                 await finish_group_remind(target, ctx, uid, ud, ud.get("repeat", "none"))
             else:
-                await save_reminder(target, uid, ud, msg, ds, ts)
+                row, sent_msg = await save_reminder(target, uid, ud, msg, ds, ts)
+                if row > 0:
+                    ctx.bot_data[f"saved_{row}"] = {"c": sent_msg.chat.id, "m": sent_msg.message_id}
     elif ds:
         ud["date"] = ds
         ud["step"] = "g_time" if is_group else "time"
@@ -2014,7 +2014,9 @@ async def _btn_cal(q, ctx, ud, uid, data):
                     now = datetime.now(utz)
                     await safe_edit(q.message, f"{hdr('New Reminder')}\n{msg}\n{fmt_time(ts)}\n\n{past_msg(ts)}\nPick a future date:", cal_kb(now.year, now.month, tz=utz))
                 else:
-                    await save_reminder(q.message, uid, ud, msg, ds, ts, edit_msg=True)
+                    row, sent_msg = await save_reminder(q.message, uid, ud, msg, ds, ts, edit_msg=True)
+                    if row > 0:
+                        ctx.bot_data[f"saved_{row}"] = {"c": sent_msg.chat.id, "m": sent_msg.message_id}
             else:
                 ud["step"] = "time"
                 await safe_edit(q.message, f"{hdr('New Reminder')}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", cancel_kb())
@@ -2358,7 +2360,9 @@ async def _do_step(update, ctx, step, text):
             return
         await del_prompt(ctx, ud)
         ud["time"] = parsed
-        await save_reminder(update.message, uid, ud, ud.get("message", ""), ds, parsed)
+        row, sent_msg = await save_reminder(update.message, uid, ud, ud.get("message", ""), ds, parsed)
+        if row > 0:
+            ctx.bot_data[f"saved_{row}"] = {"c": sent_msg.chat.id, "m": sent_msg.message_id}
 
     elif step == "edit_message":
         row = ud.get("editing_row")
@@ -2749,17 +2753,20 @@ async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
         else:
             kill_jobs(ctx.job_queue, idx)
             await rm_btns(ctx, idx)
-            saved_info = ctx.bot_data.pop(f"saved_home_{uid}", None)
-            if saved_info:
+            
+            # Remove buttons from saved message
+            saved = ctx.bot_data.pop(f"saved_{idx}", None)
+            if saved:
                 try:
                     await ctx.bot.edit_message_reply_markup(
-                        chat_id=saved_info["c"], 
-                        message_id=saved_info["m"], 
+                        chat_id=saved["c"], 
+                        message_id=saved["m"], 
                         reply_markup=None
                     )
                 except Exception:
                     pass
-            if await send_and_track(ctx, uid, f"{msg}\n\n<b>⏰ Reminder</b>", act_kb(idx), f"r_{idx}", uid):
+            
+            if await send_and_track(ctx, uid, f"{msg}\n\n⏰ Reminder", act_kb(idx), f"r_{idx}", uid):
                 sheet.update_cell(idx, 6, "pending")
                 sheet.update_cell(idx, 7, 0)
                 gap = cfg_map.get(uid_s, {"retry_gap": DEF_RETRY_GAP})["retry_gap"]
