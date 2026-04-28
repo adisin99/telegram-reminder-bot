@@ -2073,6 +2073,7 @@ async def _btn_rem(q, ctx, ud, uid, data):
             return
         kill_jobs(ctx.job_queue, row)
         await rm_btns(ctx, row)
+        await rm_saved_msg(ctx, row)
         if not advance_rep(row, r):
             sheet.update_cell(row, 6, "done")
             sheet.update_cell(row, 7, 0)
