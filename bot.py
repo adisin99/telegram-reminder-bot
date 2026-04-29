@@ -596,7 +596,7 @@ def cancel_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("✕ Cancel", callback_data="cancel")]])
 
 def close_kb(show_cb):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("— Close", callback_data=f"pclose_{show_cb}")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("➖", callback_data=f"pclose_{show_cb}")]])
 
 def act_kb(row):
     return InlineKeyboardMarkup([[InlineKeyboardButton("Snooze", callback_data=f"snzp_{row}"), InlineKeyboardButton("Done", callback_data=f"done_{row}")]])
@@ -665,14 +665,14 @@ def cfg_picker_kb(values, fmt_fn, cur, cb_prefix):
             row = []
     if row:
         btns.append(row)
-    btns.append([InlineKeyboardButton("— Close", callback_data="cfg_close")])
+    btns.append([InlineKeyboardButton("➖", callback_data="cfg_close")])
     return InlineKeyboardMarkup(btns)
 
 def gmin_kb(show_cb):
     return InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=show_cb)]])
 
 def gclose_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("— Close", callback_data="gclose")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("➖", callback_data="gclose")]])
 
 # ============= CALENDAR ==================
 def cal_kb(year, month, back_cb="cancel", back_txt="✕ Cancel", tz=None):
@@ -1134,7 +1134,7 @@ async def show_settings(target, uid, ctx, new=False):
          InlineKeyboardButton(f"Gap: {cfg['retry_gap']}m", callback_data="cfg_gap")],
         [InlineKeyboardButton(f"🌍 {tz_disp}", callback_data="cfg_tz"),
          InlineKeyboardButton(f"👥 Groups ({len(grps)})", callback_data="cfg_groups") if grps else InlineKeyboardButton(" ", callback_data="noop")],
-        [InlineKeyboardButton("— Close", callback_data="cfg_close")],
+        [InlineKeyboardButton("➖", callback_data="cfg_close")],
     ]
     show_cb = "pshow_settings"
     if new:
@@ -1275,8 +1275,8 @@ def build_month_view(uid, year, month, utz, ctx=None):
 
     pm, py = ((month - 2) % 12) + 1, year - (1 if month == 1 else 0)
     nm, ny = (month % 12) + 1, year + (1 if month == 12 else 0)
-    btns.append([InlineKeyboardButton("‹", callback_data=f"mn_{py}_{pm:02d}"), InlineKeyboardButton("›", callback_data=f"mn_{ny}_{nm:02d}")])
-    btns.append([InlineKeyboardButton("— Close", callback_data=f"pclose_pshow_month_{year}_{month:02d}")])
+    btns.append([InlineKeyboardButton("‹", callback_data=f"mn_{py}_{pm:02d}"), InlineKeyboardButton("›", callback_data=f"mn_{ny}_{nm:02d}"), 
+                 InlineKeyboardButton("➖", callback_data=f"pclose_pshow_month_{year}_{month:02d}")])
 
     return "\n".join(lines), InlineKeyboardMarkup(btns)
 
@@ -1301,7 +1301,7 @@ def build_week_view(uid, year, month, week_idx, utz):
         weeks.pop()
 
     if week_idx >= len(weeks):
-        return f"{hdr('Week')}\nInvalid week.", InlineKeyboardMarkup([[InlineKeyboardButton("— Close", callback_data=f"mn_{year}_{month:02d}")]])
+        return f"{hdr('Week')}\nInvalid week.", InlineKeyboardMarkup([[InlineKeyboardButton("➖", callback_data=f"mn_{year}_{month:02d}")]])
 
     ws, we = weeks[week_idx]
     reminders = get_user_reminders(uid)
@@ -1494,7 +1494,7 @@ async def show_list(target, uid, ctx, new=False):
     if num_row:
         btns.append(num_row)
     show_cb = "pshow_list"
-    btns.append([InlineKeyboardButton("— Close", callback_data=f"pclose_{show_cb}")])
+    btns.append([InlineKeyboardButton("➖", callback_data=f"pclose_{show_cb}")])
     if new:
         sent = await target.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
         schedule_minimize(ctx, sent, f"<b>📋 Reminders</b> ({len(items)})", show_cb)
@@ -2194,7 +2194,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
         ud["step"] = "set_digest_time"
         cfg = get_cfg(uid)
         await safe_edit(q.message, f"{hdr('Settings')}\nDigest time: <b>{fmt_time(cfg['digest_time'])}</b>\n\nEnter new time:\n<i>e.g. 7am, 8:30 AM</i>",
-                        InlineKeyboardMarkup([[InlineKeyboardButton("— Close", callback_data="cfg_close")]]))
+                        InlineKeyboardMarkup([[InlineKeyboardButton("➖", callback_data="cfg_close")]]))
         save_p(ud, q.message)
     elif data == "cfg_retries":
         cfg = get_cfg(uid)
@@ -2224,7 +2224,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
                 row = []
         if row:
             btns.append(row)
-        btns.append([InlineKeyboardButton("— Close", callback_data="cfg_close")])
+        btns.append([InlineKeyboardButton("➖", callback_data="cfg_close")])
         await safe_edit(q.message, f"{hdr('Timezone')}\n\nCurrent: <b>{tz_short(cfg.get('timezone', DEF_TZ))}</b>\n\nPick a region:", InlineKeyboardMarkup(btns))
     elif data.startswith("tzr_"):
         cfg = get_cfg(uid)
@@ -2253,7 +2253,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
         grps = get_user_groups(uid)
         if not grps:
             await safe_edit(q.message, f"{hdr('Groups')}\n\nNo group subscriptions.",
-                            InlineKeyboardMarkup([[InlineKeyboardButton("— Close", callback_data="cfg_close")]]))
+                            InlineKeyboardMarkup([[InlineKeyboardButton("➖", callback_data="cfg_close")]]))
             return
         btns = []
         for gid in grps:
@@ -2263,7 +2263,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
             except Exception:
                 name = f"Group {gid}"
             btns.append([InlineKeyboardButton(f"✕ {name}", callback_data=f"gunsub_{gid}")])
-        btns.append([InlineKeyboardButton("— Close", callback_data="cfg_close")])
+        btns.append([InlineKeyboardButton("➖", callback_data="cfg_close")])
         await safe_edit(q.message, f"{hdr('Group Subscriptions')}\n\nTap to unsubscribe:", InlineKeyboardMarkup(btns))
     elif data.startswith("gunsub_"):
         gid_s, uid_s = data[7:], str(uid)
