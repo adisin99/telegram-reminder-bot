@@ -1265,11 +1265,11 @@ def build_month_view(uid, year, month, utz, ctx=None):
         if parts:
             lines.append(" · ".join(parts))
 
-    # Week buttons — 2 per row
+    # Week buttons — 4 per row
     btns = []
     num_row = []
     for i in range(len(weeks)):
-        num_row.append(InlineKeyboardButton(str(i + 1), callback_data=f"mw_{year}_{month:02d}_{i}"))
+        num_row.append(InlineKeyboardButton(f"W{i + 1}", callback_data=f"mw_{year}_{month:02d}_{i}"))
     if num_row:
         btns.append(num_row)
 
@@ -1494,7 +1494,10 @@ async def show_list(target, uid, ctx, new=False):
     if num_row:
         btns.append(num_row)
     show_cb = "pshow_list"
-    btns.append([InlineKeyboardButton("🔴", callback_data=f"pclose_{show_cb}")])
+    if num_row and len(num_row) < 5:
+        btns[-1].append(InlineKeyboardButton("🔴", callback_data=f"pclose_{show_cb}"))
+    else:
+        btns.append([InlineKeyboardButton("🔴", callback_data=f"pclose_{show_cb}")])
     if new:
         sent = await target.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
         schedule_minimize(ctx, sent, f"<b>📋 Reminders</b> ({len(items)})", show_cb)
