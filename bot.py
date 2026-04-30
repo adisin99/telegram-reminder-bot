@@ -1567,24 +1567,34 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data in ("home", "cancel"):
         cancelled_msg = ud.get("message", "")
+        await del_prompt(ctx, ud)
         ud.clear()
         
         if cancelled_msg:
-            cancel_text = f"✕ Cancelled\n{DIV}\n{cancelled_msg}\n\n{HOME_TEXT}"
-            await safe_edit(q.message, cancel_text, home_kb())
-        else:
-            await safe_edit(q.message, HOME_TEXT, home_kb())
-        
-        save_home(ud, q.message)
+            await q.message.reply_text(
+                f"✕ Cancelled\n{DIV}\n<s>{cancelled_msg}</s>",
+                parse_mode="HTML"
+            )
+         # Send home screen as NEW message
+        sent = await q.message.reply_text(HOME_TEXT, reply_markup=home_kb(), parse_mode="HTML")
+        save_home(ud, sent)
         return
         
-        if data == "gcancel":
-            cancelled_msg = ud.get("message", "")
-            ud.clear()
+     if data == "gcancel":
+        cancelled_msg = ud.get("message", "")
+        await del_prompt(ctx, ud)
+        ud.clear()
+        
         if cancelled_msg:
-            await safe_edit(q.message, f"✕ Cancelled\n{DIV}\n{cancelled_msg}")
+            await q.message.reply_text(
+                f"✕ Cancelled\n{DIV}\n<s>{cancelled_msg}</s>",
+                parse_mode="HTML"
+            )
         else:
-            await safe_edit(q.message, f"{hdr('Group Reminder')}\n\nCancelled.")
+            await q.message.reply_text(
+                f"{hdr('Group Reminder')}\n\nCancelled.",
+                parse_mode="HTML"
+            )
         return
 
     # Group close → MINIMIZE
