@@ -592,19 +592,19 @@ def schedule_minimize(ctx, sent, min_text, show_cb, timeout=AUTO_MIN_SEC):
 # ============= UI ========================
 HOME_TEXT = (
     f"{hdr('RemindX')}\n"
-    "Type your reminder below:\n\n"
-    "<i>Buy milk tomorrow at 5pm</i>\n"
-    "<i>Gym at 6pm daily</i>\n"
-    "<i>Meeting Monday 10am weekly</i>\n"
-    "<i>Call mom in 30 min</i>\n\n"
-    "Or tap ＋ New for step-by-step."
+    "Just type your reminder:\n\n"
+    "Buy milk tomorrow at 5pm\n"
+    "Gym at 6pm daily\n"
+    "Meeting Monday 10am weekly\n"
+    "Call mom in 30 min"
+    "Remind me to drink water"
 )
 
 def home_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("＋ New", callback_data="add")]])
-
-def new_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("＋ New", callback_data="add")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 List", callback_data="list_refresh"),
+         InlineKeyboardButton("📅 Month", callback_data="month_view")]
+    ])
 
 def cancel_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("✕ Cancel", callback_data="cancel")]])
@@ -623,8 +623,8 @@ def saved_kb(row, rep):
     btns = []
     if r == "none" or not r:
         btns.append(InlineKeyboardButton("🔁 Repeat", callback_data=f"chrep_{row}"))
-    btns.append(InlineKeyboardButton("✎ Edit", callback_data=f"edit_saved_{row}"))  # CHANGED
-    return InlineKeyboardMarkup([btns, [InlineKeyboardButton("＋ New", callback_data="add")]])
+    btns.append(InlineKeyboardButton("✎ Edit", callback_data=f"edit_saved_{row}"))
+    return InlineKeyboardMarkup([btns]) 
 
 def gjoin_kb(tid, show_rep=False):
     btns = [[InlineKeyboardButton("＋ Count Me In", callback_data=f"gjoin_{tid}"), InlineKeyboardButton("✕ Skip", callback_data=f"gskip_{tid}")]]
@@ -1371,7 +1371,7 @@ async def save_reminder(target, uid, ud, msg, date, time_str, edit_msg=False):
         row = 0
     ud.clear()
     txt = f"{hdr('✓ Saved')}\n{detail(msg, date, time_str, fmt_rep(rep))}"
-    kb = saved_kb(row, rep) if row > 0 else new_kb()
+    kb = saved_kb(row, rep) if row > 0 else home_kb()
     if edit_msg:
         await safe_edit(target, txt, kb)
         save_home(ud, target)
@@ -1666,15 +1666,27 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_list(q.message, uid, ctx)
         return
 
+    if data == "month_view":
+        uid = q.from_user.id
+        utz = get_tz(uid)
+        now = datetime.now(utz)
+        txt, kb = build_month_view(uid, now.year, now.month, utz, ctx)
+        await safe_edit(q.message, txt, kb)
+        return
+    
+    if data == "cfg_settings":
+        await show_settings(q.message, q.from_user.id, ctx)
+        return
+        
     # Weekly report detail
     if data == "wrdetail":
         utz = get_tz(uid)
         now = datetime.now(utz)
         detail_text = build_weekly_detail(uid, now, utz)
         if detail_text:
-            await safe_edit(q.message, detail_text, new_kb())
+            await safe_edit(q.message, detail_text, home_kb())
         else:
-            await safe_edit(q.message, f"{hdr('Weekly Detail')}\nNo data available.", new_kb())
+            await safe_edit(q.message, f"{hdr('Weekly Detail')}\nNo data available.", home_kb())
         save_home(ud, q.message)
         return
 
@@ -1704,7 +1716,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         r, msg, ds, ts, rs = row_detail(row)
         sheet.update_cell(row, 5, rep)
-        await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep))}", new_kb())
+        await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep))}", home_kb())
         save_home(ud, q.message)
         return
 
@@ -1721,7 +1733,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         r, msg, ds, ts, rs = row_detail(row)
         sheet.update_cell(row, 5, rep)
-        await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep))}", new_kb())
+        await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep))}", home_kb())
         save_home(ud, q.message)
         return
 
@@ -1805,13 +1817,13 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             row = int(key)
             r, msg, ds, ts, rs = row_detail(row)
             sheet.update_cell(row, 5, rep_value)
-            await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep_value))}", new_kb())
+            await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep_value))}", home_kb())
             save_home(ud, q.message)
         elif kind == "erep":
             row = int(key)
             r, msg, ds, ts, rs = row_detail(row)
             sheet.update_cell(row, 5, rep_value)
-            await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep_value))}", new_kb())
+            await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep_value))}", home_kb())
             save_home(ud, q.message)
         elif kind == "gchrep":
             row, r = find_by_tid(key)
@@ -1996,7 +2008,7 @@ async def _btn_cal(q, ctx, ud, uid, data):
             else:
                 sheet.update_cell(row, 3, ds)
                 ud.clear()
-                await safe_edit(q.message, f"{hdr('Updated ✓')}\n{msg}\nDate: {fmt_date(old_d)} → <b>{fmt_date(ds)}</b>\nTime: {fmt_time(ts)} · {rs}", new_kb())
+                await safe_edit(q.message, f"{hdr('Updated ✓')}\n{msg}\nDate: {fmt_date(old_d)} → <b>{fmt_date(ds)}</b>\nTime: {fmt_time(ts)} · {rs}", home_kb())
                 save_home(ud, q.message)
 
         elif step == "g_date":
@@ -2116,7 +2128,7 @@ async def _btn_rem(q, ctx, ud, uid, data):
         row = int(data[5:])
         r, msg, ds, ts, rs = row_detail(row)
         sheet.update_cell(row, 6, "active")
-        await safe_edit(q.message, f"{hdr('Restored ✓')}\n{detail(msg, ds, ts, rs)}", new_kb())
+        await safe_edit(q.message, f"{hdr('Restored ✓')}\n{detail(msg, ds, ts, rs)}", home_kb())
         save_home(ud, q.message)
 
 async def _btn_edit(q, ud, uid, data):
@@ -2204,7 +2216,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
         cfg = get_cfg(uid)
         save_cfg(uid, "digest_on", str(not cfg["digest_on"]).lower())
         new_val = "ON" if not cfg["digest_on"] else "OFF"
-        await safe_edit(q.message, f"{hdr('Settings')}\n\nDigest → <b>{new_val}</b>", new_kb())
+        await safe_edit(q.message, f"{hdr('Settings')}\n\nDigest → <b>{new_val}</b>", home_kb())
         save_home(ud, q.message)
     elif data == "cfg_digest_time":
         ud.clear()
@@ -2220,7 +2232,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
     elif data.startswith("cfgr_"):
         val = int(data[5:])
         save_cfg(uid, "max_retries", val)
-        await safe_edit(q.message, f"{hdr('Settings')}\n\nRetries → <b>{val}×</b>", new_kb())
+        await safe_edit(q.message, f"{hdr('Settings')}\n\nRetries → <b>{val}×</b>", home_kb())
         save_home(ud, q.message)
     elif data == "cfg_gap":
         cfg = get_cfg(uid)
@@ -2229,7 +2241,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
     elif data.startswith("cfgg_"):
         val = int(data[5:])
         save_cfg(uid, "retry_gap", val)
-        await safe_edit(q.message, f"{hdr('Settings')}\n\nRetry gap → <b>{val} min</b>", new_kb())
+        await safe_edit(q.message, f"{hdr('Settings')}\n\nRetry gap → <b>{val} min</b>", home_kb())
         save_home(ud, q.message)
     elif data == "cfg_tz":
         cfg = get_cfg(uid)
@@ -2264,7 +2276,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
         if 0 <= idx < len(TZ_DATA):
             tz_name, country, _, _ = TZ_DATA[idx]
             save_cfg(uid, "timezone", tz_name)
-            await safe_edit(q.message, f"{hdr('Settings')}\n\nTimezone → <b>{country}</b>", new_kb())
+            await safe_edit(q.message, f"{hdr('Settings')}\n\nTimezone → <b>{country}</b>", home_kb())
             save_home(ud, q.message)
     elif data == "cfg_groups":
         grps = get_user_groups(uid)
@@ -2297,7 +2309,7 @@ async def _btn_cfg(q, ctx, ud, uid, data):
             name = chat.title or f"Group {gid_s}"
         except Exception:
             name = f"Group {gid_s}"
-        await safe_edit(q.message, f"{hdr('Settings')}\n\nUnsubscribed from <b>{name}</b> ✓", new_kb())
+        await safe_edit(q.message, f"{hdr('Settings')}\n\nUnsubscribed from <b>{name}</b> ✓", home_kb())
         save_home(ud, q.message)
 
 # ============= TEXT HANDLER ===============
@@ -2403,7 +2415,7 @@ async def _do_step(update, ctx, step, text):
         ud.clear()
         sent = await update.message.reply_text(
             f"{hdr('Updated ✓')}\nMessage: {old} → <b>{text}</b>\n{fmt_date(ds)} · {fmt_time(ts)} · {rs}",
-            reply_markup=new_kb(), parse_mode="HTML")
+            reply_markup=home_kb(), parse_mode="HTML")
         save_home(ud, sent)
     elif step == "edit_time":
         row = ud.get("editing_row")
@@ -2422,7 +2434,7 @@ async def _do_step(update, ctx, step, text):
         ud.clear()
         sent = await update.message.reply_text(
             f"{hdr('Updated ✓')}\n{msg}\nTime: {fmt_time(old_t)} → <b>{fmt_time(parsed)}</b> · {fmt_date(ds)} · {rs}",
-            reply_markup=new_kb(), parse_mode="HTML")
+            reply_markup=home_kb(), parse_mode="HTML")
         save_home(ud, sent)
     elif step == "set_digest_time":
         parsed = parse_time(text)
@@ -2434,7 +2446,7 @@ async def _do_step(update, ctx, step, text):
         ud.clear()
         sent = await update.message.reply_text(
             f"{hdr('Settings')}\n\nDigest time → <b>{fmt_time(parsed)}</b>",
-            reply_markup=new_kb(), parse_mode="HTML")
+            reply_markup=home_kb(), parse_mode="HTML")
         save_home(ud, sent)
 
     elif step == "g_message":
@@ -2645,7 +2657,7 @@ async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
         else:
             lines = [f"☀️ <b>Good morning!</b>\n{DIV}\n\nToday — {today_str}\n", "No reminders today. Enjoy your day!"]
         try:
-            await ctx.bot.send_message(chat_id=uid_int, text="\n".join(lines), reply_markup=new_kb(), parse_mode="HTML")
+            await ctx.bot.send_message(chat_id=uid_int, text="\n".join(lines), reply_markup=home_kb(), parse_mode="HTML")
         except Exception as e:
             logger.error(f"[DIGEST] {r[0]}: {e}")
 
