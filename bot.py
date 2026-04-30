@@ -593,11 +593,11 @@ def schedule_minimize(ctx, sent, min_text, show_cb, timeout=AUTO_MIN_SEC):
 HOME_TEXT = (
     f"{hdr('RemindX')}\n"
     "Just type your reminder:\n\n"
-    "Buy milk tomorrow at 5pm\n"
-    "Gym at 6pm daily\n"
-    "Meeting Monday 10am weekly\n"
-    "Call mom in 30 min"
-    "Remind me to drink water"
+    "<i>Buy milk tomorrow at 5pm</i>\n"
+    "<i>Gym at 6pm daily</i>\n"
+    "<i>Meeting Monday 10am weekly</i>\n"
+    "<i>Call mom in 30 min</i>\n"
+    "<i>Remind me to drink water</i>"
 )
 
 def home_kb():
@@ -1565,14 +1565,26 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         update_username(uid, get_username(q.from_user))
 
-    if data in ("home", "cancel"):
+        if data in ("home", "cancel"):
+        cancelled_msg = ud.get("message", "")
         ud.clear()
-        await safe_edit(q.message, HOME_TEXT, home_kb())
+        
+        if cancelled_msg:
+            cancel_text = f"✕ Cancelled\n{DIV}\n{cancelled_msg}\n\n{HOME_TEXT}"
+            await safe_edit(q.message, cancel_text, home_kb())
+        else:
+            await safe_edit(q.message, HOME_TEXT, home_kb())
+        
         save_home(ud, q.message)
         return
-    if data == "gcancel":
-        ud.clear()
-        await safe_edit(q.message, f"{hdr('Group Reminder')}\n\nCancelled.")
+        
+        if data == "gcancel":
+            cancelled_msg = ud.get("message", "")
+            ud.clear()
+        if cancelled_msg:
+            await safe_edit(q.message, f"✕ Cancelled\n{DIV}\n{cancelled_msg}")
+        else:
+            await safe_edit(q.message, f"{hdr('Group Reminder')}\n\nCancelled.")
         return
 
     # Group close → MINIMIZE
