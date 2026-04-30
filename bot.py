@@ -1580,10 +1580,10 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_home(ud, sent)
         return
         
-     if data == "gcancel":
-         cancelled_msg = ud.get("message", "")
-         await del_prompt(ctx, ud)
-         ud.clear()
+    if data == "gcancel":
+        cancelled_msg = ud.get("message", "")
+        await del_prompt(ctx, ud)
+        ud.clear()
         
         if cancelled_msg:
             await q.message.reply_text(
