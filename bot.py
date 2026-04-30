@@ -1581,9 +1581,9 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
         
      if data == "gcancel":
-        cancelled_msg = ud.get("message", "")
-        await del_prompt(ctx, ud)
-        ud.clear()
+         cancelled_msg = ud.get("message", "")
+         await del_prompt(ctx, ud)
+         ud.clear()
         
         if cancelled_msg:
             await q.message.reply_text(
