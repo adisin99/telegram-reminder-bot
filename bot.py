@@ -1565,7 +1565,7 @@ async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         update_username(uid, get_username(q.from_user))
 
-        if data in ("home", "cancel"):
+    if data in ("home", "cancel"):
         cancelled_msg = ud.get("message", "")
         ud.clear()
         
