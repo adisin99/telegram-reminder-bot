@@ -79,6 +79,20 @@ TZ_DATA = [
     ("Africa/Johannesburg", "S. Africa", "+2", "Africa"),
 ]
 
+# Ignore these common chat words as reminders
+IGNORE_WORDS = {
+    'hi', 'hello', 'hey', 'yo',
+    'thanks', 'thank', 'thank you', 'ty', 'thx',
+    'ok', 'okay', 'k', 'kk', 'okays',
+    'yes', 'yeah', 'yep', 'yup', 'y',
+    'no', 'nah', 'nope', 'n',
+    'bye', 'goodbye', 'cya', 'see you',
+    'good morning', 'good night', 'gm', 'gn',
+    'lol', 'haha', 'hehe',
+    'what', 'why', 'how', 'when', 'where',
+    'help', '?',
+}
+
 TZ_REGIONS = list(dict.fromkeys(t[3] for t in TZ_DATA))
 TZ_ICONS = {"Asia": "🌏", "Europe": "🌍", "Americas": "🌎", "Oceania": "🌏", "Africa": "🌍"}
 
@@ -2307,25 +2321,37 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def _try_nl(update, ctx, text):
     uid, utz = update.effective_user.id, get_tz(update.effective_user.id)
     result = parse_nl_partial(text, tz=utz)
-    if not result or not result['message']:
+    
+    # If parsing completely failed, use raw text as message
+    if not result or not result.get('message'):
+        msg = text.strip()
+        ts, ds, rep = None, None, None
+    else:
+        msg = result['message']
+        ts = result.get('time')
+        ds = result.get('date')
+        rep = result.get('repeat')
+    
+    if not msg:
         return
-
-    msg, ts, ds, rep = result['message'], result.get('time'), result.get('date'), result.get('repeat')
+    msg_lower = msg.lower().strip()
+    if msg_lower in IGNORE_WORDS:
+        return
 
     has_prefix = bool(re.search(r'(?:remind|reminder|remember|don.?t\s+forget|set\s+reminder)', text, re.I))
-    if not ts and not ds and not has_prefix:
-        return
-
-    ud = ctx.user_data
-    await rm_home(ctx, ud)
-    ud.clear()
-    ud["message"] = msg
-    if ts:
-        ud["time"] = ts
-    if rep:
-        ud["repeat"] = rep
-
-    await handle_nl_result(update.message, ctx, uid, ud, msg, ts, ds, utz)
+    
+ 
+    if ts or ds or has_prefix or msg_lower not in IGNORE_WORDS:
+        ud = ctx.user_data
+        await rm_home(ctx, ud)
+        ud.clear()
+        ud["message"] = msg
+        if ts:
+            ud["time"] = ts
+        if rep:
+            ud["repeat"] = rep
+        
+        await handle_nl_result(update.message, ctx, uid, ud, msg, ts, ds, utz)
 
 async def _do_step(update, ctx, step, text):
     ud, uid = ctx.user_data, update.effective_user.id
