@@ -154,31 +154,26 @@ async def show_today_digest(target, uid, ctx, from_insights=False):
     utz = get_tz(uid)
     now = datetime.now(utz)
     today = now.strftime("%Y-%m-%d")
-    try:
-        rows = sheet.get_all_values()
-    except:
-        rows = []
+    rows = sheet.get_all_values()
     todays = [r for r in rows[1:] 
               if len(r) >= 6 and str(r[0]) == str(uid) and norm_date(r[2]) == today 
               and r[5] in ("active", "pending", "snoozed")]
     todays.sort(key=lambda x: norm_time(x[3]))
 
-    lines = [f" Today's Reminders · {now.strftime('%-d %b')}\n{DIV}\n"]
+    lines = [f"Today's Reminders · {now.strftime('%-d %b')}\n{DIV}\n"]
     if todays:
+        btns = []
+        row_buttons = []
         for i, r in enumerate(todays, 1):
-            row_idx = rows.index(r) + 1
+            row_idx = rows.index(r) + 2  # correct row number
             msg = r[1][:45] + ("…" if len(r[1]) > 45 else "")
             lines.append(f"{i}. {ST_IC.get(r[5], '○')} {fmt_time(norm_time(r[3]))} · {msg}")
-        btns = []
-        row = []
-        for i, r in enumerate(todays):
-            row_idx = rows.index(r) + 1
-            row.append(InlineKeyboardButton(str(i+1), callback_data=f"view_{row_idx}"))
-            if len(row) == 6:
-                btns.append(row)
-                row = []
-        if row:
-            btns.append(row)
+            row_buttons.append(InlineKeyboardButton(str(i), callback_data=f"view_{row_idx}"))
+            if len(row_buttons) == 6:
+                btns.append(row_buttons)
+                row_buttons = []
+        if row_buttons:
+            btns.append(row_buttons)
         back_cb = "insights" if from_insights else "schedule_view"
         btns.append([InlineKeyboardButton("← Back", callback_data=back_cb)])
         kb = InlineKeyboardMarkup(btns)
@@ -189,10 +184,7 @@ async def show_today_digest(target, uid, ctx, from_insights=False):
     await safe_edit(target, "\n".join(lines), kb)
 
 async def show_upcoming_list(target, uid, ctx):
-    try:
-        rows = sheet.get_all_values()
-    except:
-        rows = []
+    rows = sheet.get_all_values()
     upcoming = [r for r in rows[1:] 
                 if len(r) >= 6 and str(r[0]) == str(uid) and r[5] in ("active", "pending", "snoozed")]
     upcoming.sort(key=lambda x: (norm_date(x[2]), norm_time(x[3])))
@@ -204,18 +196,18 @@ async def show_upcoming_list(target, uid, ctx):
 
     lines = [hdr("Upcoming Reminders")]
     btns = []
-    row = []
+    row_buttons = []
     for idx, r in enumerate(upcoming[:50], 1):
-        row_idx = rows.index(r) + 1
+        row_idx = rows.index(r) + 2
         rep = fmt_rep(r[4])+ " · " if r[4] != "none" else ""
         short = r[1][:38] + ("…" if len(r[1]) > 38 else "")
         lines.append(f"\n<b>{idx}</b> {ST_IC.get(r[5], '○')} {fmt_date(norm_date(r[2]))} {fmt_time(norm_time(r[3]))}\n    {rep}{short}")
-        row.append(InlineKeyboardButton(str(idx), callback_data=f"view_{row_idx}"))
-        if len(row) == 5:
-            btns.append(row)
-            row = []
-    if row:
-        btns.append(row)
+        row_buttons.append(InlineKeyboardButton(str(idx), callback_data=f"view_{row_idx}"))
+        if len(row_buttons) == 5:
+            btns.append(row_buttons)
+            row_buttons = []
+    if row_buttons:
+        btns.append(row_buttons)
     btns.append([InlineKeyboardButton("← Schedule", callback_data="schedule_view")])
     await safe_edit(target, "\n".join(lines), InlineKeyboardMarkup(btns))
 
@@ -264,6 +256,20 @@ async def send_monthly_report(target, uid, year, month, utz):
         [InlineKeyboardButton("← Insights", callback_data="insights")]
     ])
     await safe_edit(target, txt, kb)
+
+async def post_init(app: Application) -> None:
+    await app.bot.set_my_commands([
+        BotCommand("start", "Home"),
+        BotCommand("add", "New reminder"),
+        BotCommand("remind", "Group reminder"),
+        BotCommand("settings", "Settings"),
+        BotCommand("info", "About this bot"),
+    ], scope=BotCommandScopeAllPrivateChats())
+    
+    await app.bot.set_my_commands([
+        BotCommand("start", "Bot info & commands"),
+        BotCommand("remind", "Group reminder"),
+    ], scope=BotCommandScopeAllGroupChats())
 
 # ============= CALLBACK HANDLER — ADD NEW CASES ================
 async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
