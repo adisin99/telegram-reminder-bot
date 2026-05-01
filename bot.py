@@ -1733,8 +1733,345 @@ async def save_reminder(target, uid, ud, msg, date, time_str, edit_msg=False):
         save_home(ud, sent)
         return (row, sent)
 
-# ============= Keep existing scheduler functions ===============
-# The scheduler functions (check_reminders, check_digest, etc.) remain unchanged
+# ============= SCHEDULER FUNCTIONS ===============
+async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        cfg_vals = cfg_sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            cfg_vals = cfg_sheet.get_all_values()
+        except Exception:
+            cfg_vals = []
+    tz_map, cfg_map = {}, {}
+    for r in cfg_vals[1:]:
+        if not r:
+            continue
+        uid_s = str(r[0])
+        tz_map[uid_s] = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        cfg_map[uid_s] = {
+            "retry_gap": int(r[4]) if len(r) > 4 and r[4] else DEF_RETRY_GAP,
+            "max_retries": int(r[3]) if len(r) > 3 and r[3] else DEF_RETRIES,
+        }
+    try:
+        vals = sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            vals = sheet.get_all_values()
+        except Exception as e:
+            logger.error(f"[CRON] {e}")
+            return
+    for idx, v in enumerate(vals[1:], 2):
+        if len(v) < 7 or str(v[5]).strip().lower() != "active":
+            continue
+        uid_s = str(v[0])
+        user_tz = safe_tz(tz_map.get(uid_s, DEF_TZ))
+        now = datetime.now(user_tz)
+        if norm_date(str(v[2]).strip()) != now.strftime("%Y-%m-%d"):
+            continue
+        if norm_time(str(v[3]).strip()) != now.strftime("%H:%M"):
+            continue
+        rep = str(v[4]).strip() if len(v) > 4 else "none"
+        if not is_custom_day_match(rep, now):
+            continue
+        uid = int(v[0]) if v[0].isdigit() else v[0]
+        msg = str(v[1]).strip()
+        gid = str(v[7]).strip() if len(v) > 7 else ""
+        tid = str(v[8]).strip() if len(v) > 8 else ""
+        logger.info(f"[CRON] FIRE {idx}: '{msg[:30]}' uid={uid} gid={gid}")
+        if gid and tid:
+            await fire_group(ctx, idx, v, uid, msg, gid, tid, cfg_map.get(uid_s, {}))
+        else:
+            kill_jobs(ctx.job_queue, idx)
+            await rm_btns(ctx, idx)
+            
+            # Remove buttons from saved message
+            saved = ctx.bot_data.pop(f"saved_{idx}", None)
+            if saved:
+                try:
+                    await ctx.bot.edit_message_reply_markup(
+                        chat_id=saved["c"], 
+                        message_id=saved["m"], 
+                        reply_markup=None
+                    )
+                except Exception:
+                    pass
+            
+            if await send_and_track(ctx, uid, f"{msg}\n\n⏰ Reminder", act_kb(idx), f"r_{idx}", uid):
+                sheet.update_cell(idx, 6, "pending")
+                sheet.update_cell(idx, 7, 0)
+                gap = cfg_map.get(uid_s, {"retry_gap": DEF_RETRY_GAP})["retry_gap"]
+                ctx.job_queue.run_once(auto_retry, gap * 60, data={"row": idx, "chat": uid}, name=f"retry-{idx}")
+
+async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        cfg_rows = cfg_sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            cfg_rows = cfg_sheet.get_all_values()
+        except Exception:
+            return
+    for r in cfg_rows[1:]:
+        if len(r) < 3 or str(r[1]).lower() != "true":
+            continue
+        tz_name = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        user_tz = safe_tz(tz_name)
+        now = datetime.now(user_tz)
+        if norm_time(r[2]) != now.strftime("%H:%M"):
+            continue
+        try:
+            uid_int = int(r[0])
+        except (ValueError, TypeError):
+            continue
+        try:
+            rem_rows = sheet.get_all_values()
+        except Exception:
+            continue
+        today = now.strftime("%Y-%m-%d")
+        items = [v for v in rem_rows[1:] if len(v) >= 6 and str(v[0]) == str(r[0])
+                 and str(v[5]).strip().lower() in ("active", "snoozed") and norm_date(str(v[2]).strip()) == today
+                 and not (len(v) > 7 and str(v[7]).strip())]
+        items.sort(key=lambda x: norm_time(str(x[3]).strip()))
+        today_str = now.strftime("%-d %b")
+        if items:
+            lines = [f"☀️ <b>Good morning!</b>\n{DIV}\n\nToday — {today_str}\n"]
+            for v in items:
+                msg = str(v[1]).strip()
+                lines.append(f"  {fmt_time(norm_time(str(v[3]).strip()))} · {msg[:30] + '…' if len(msg) > 30 else msg}")
+            lines.append(f"\n{len(items)} reminder{'s' if len(items) != 1 else ''} today")
+        else:
+            lines = [f"☀️ <b>Good morning!</b>\n{DIV}\n\nToday — {today_str}\n", "No reminders today. Enjoy your day!"]
+        try:
+            await ctx.bot.send_message(chat_id=uid_int, text="\n".join(lines), reply_markup=home_kb(), parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"[DIGEST] {r[0]}: {e}")
+
+async def check_weekly_report(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        cfg_rows = cfg_sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            cfg_rows = cfg_sheet.get_all_values()
+        except Exception:
+            return
+    for r in cfg_rows[1:]:
+        tz_name = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        user_tz = safe_tz(tz_name)
+        now = datetime.now(user_tz)
+        if now.weekday() != 6:
+            continue
+        if now.strftime("%H:%M") != "09:00":
+            continue
+        try:
+            uid_int = int(r[0])
+        except (ValueError, TypeError):
+            continue
+        try:
+            rem_rows = sheet.get_all_values()
+        except Exception:
+            continue
+        week_start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        week_end = now.strftime("%Y-%m-%d")
+        uid_s = str(r[0])
+        done, missed = 0, 0
+        day_done, day_missed = {}, {}
+        for v in rem_rows[1:]:
+            if len(v) < 6 or str(v[0]) != uid_s:
+                continue
+            if len(v) > 7 and str(v[7]).strip():
+                continue
+            ds = norm_date(str(v[2]).strip())
+            st = str(v[5]).strip().lower()
+            if week_start <= ds <= week_end:
+                if st == "done":
+                    done += 1
+                elif st == "missed":
+                    missed += 1
+                try:
+                    wd = datetime.strptime(ds, "%Y-%m-%d").strftime("%A")
+                    if st == "done":
+                        day_done[wd] = day_done.get(wd, 0) + 1
+                    elif st == "missed":
+                        day_missed[wd] = day_missed.get(wd, 0) + 1
+                except Exception:
+                    pass
+        total = done + missed
+        if total == 0:
+            continue
+        pct = round(done / total * 100)
+        best_day = max(day_done, key=day_done.get) if day_done else "—"
+        worst_day = max(day_missed, key=day_missed.get) if day_missed else "—"
+        if pct >= 90:
+            mot = "Outstanding! 🏆"
+        elif pct >= 70:
+            mot = "Keep it up! 💪"
+        elif pct >= 50:
+            mot = "Room to improve 📈"
+        else:
+            mot = "Let's do better next week 🎯"
+        ws_d = (now - timedelta(days=7)).strftime("%-d %b")
+        we_d = now.strftime("%-d %b")
+        txt = (
+            f"📊 <b>Weekly Report</b>\n{DIV}\n{ws_d} — {we_d}\n\n"
+            f"✅ Completed: {done}/{total} ({pct}%)\n"
+            f"❌ Missed: {missed}\n\n"
+            f"📅 Most Productive: {best_day}\n"
+            f"📉 Most Missed: {worst_day}\n\n"
+            f"{mot}"
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Detail", callback_data="wrdetail"), InlineKeyboardButton("＋ New", callback_data="add")]])
+        try:
+            await ctx.bot.send_message(chat_id=uid_int, text=txt, reply_markup=kb, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"[WEEKLY] {uid_s}: {e}")
+
+# ============= FIRE & RETRY FUNCTIONS ===============
+async def send_and_track(ctx, chat_id, text, kb, track_key, track_cid):
+    try:
+        sent = await ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML")
+        ctx.bot_data[track_key] = {"c": track_cid, "m": sent.message_id}
+        return True
+    except Exception as e:
+        logger.error(f"Send {chat_id}: {e}")
+        return False
+
+async def snooze_cb(ctx: ContextTypes.DEFAULT_TYPE):
+    row, chat = ctx.job.data["row"], ctx.job.data["chat"]
+    try:
+        r = sheet.row_values(row)
+    except Exception as e:
+        logger.error(f"snooze row {row}: {e}")
+        return
+    if not r or len(r) <= 5 or r[5] != "snoozed":
+        return
+    await rm_btns(ctx, row)
+    if await send_and_track(ctx, chat, f"{str(r[1]).strip()}\n\n<b>⏰ Reminder</b>", act_kb(row), f"r_{row}", chat):
+        sheet.update_cell(row, 6, "pending")
+        sheet.update_cell(row, 7, 0)
+        cfg = get_cfg(int(r[0]) if r[0].isdigit() else r[0])
+        ctx.job_queue.run_once(auto_retry, cfg["retry_gap"] * 60, data={"row": row, "chat": chat}, name=f"retry-{row}")
+
+async def auto_retry(ctx: ContextTypes.DEFAULT_TYPE):
+    row, chat = ctx.job.data["row"], ctx.job.data["chat"]
+    try:
+        r = sheet.row_values(row)
+    except Exception as e:
+        logger.error(f"retry {row}: {e}")
+        return
+    if not r or len(r) <= 5 or r[5] != "pending":
+        return
+    uid_val = int(r[0]) if r[0].isdigit() else r[0]
+    cfg = get_cfg(uid_val)
+    max_r, gap = cfg["max_retries"], cfg["retry_gap"]
+    count = int(r[6]) if len(r) > 6 and r[6].isdigit() else 0
+    if count >= max_r:
+        if not advance_rep(row, r):
+            sheet.update_cell(row, 6, "missed")
+            sheet.update_cell(row, 7, 0)
+        return
+    await rm_btns(ctx, row)
+    nc = count + 1
+    await send_and_track(ctx, chat, f"{str(r[1]).strip()}\n\n<b>Reminder</b> ({nc}/{max_r})", act_kb(row), f"r_{row}", chat)
+    sheet.update_cell(row, 7, nc)
+    if nc >= max_r:
+        if not advance_rep(row, r):
+            sheet.update_cell(row, 6, "missed")
+            sheet.update_cell(row, 7, 0)
+    else:
+        ctx.job_queue.run_once(auto_retry, gap * 60, data={"row": row, "chat": chat}, name=f"retry-{row}")
+
+async def grp_snooze_cb(ctx: ContextTypes.DEFAULT_TYPE):
+    tid, uid, uid_s = ctx.job.data["tid"], ctx.job.data["uid"], ctx.job.data["uid_s"]
+    st = next((s for u, _, s in get_tmembers(tid) if str(u) == uid_s), None)
+    if st != "snoozed":
+        return
+    set_tstatus(tid, uid_s, "pending")
+    row, r = find_by_tid(tid)
+    if not r:
+        return
+    msg = str(r[1]).strip()
+    await rm_gpm(ctx, tid, uid_s)
+    if not await send_and_track(ctx, uid, f"{msg}\n\n<b>⏰ Group Reminder</b>", gact_kb(tid), f"gpm_{tid}_{uid_s}", uid):
+        set_tstatus(tid, uid_s, "missed")
+    await update_gstatus(ctx, tid, msg)
+
+async def fire_group(ctx, row, v, uid, msg, gid, tid, cfg):
+    active = [(u, n) for u, n, s in get_tmembers(tid) if s == "waiting"]
+    if not active:
+        sheet.update_cell(row, 6, "done")
+        return
+    for u, n in active:
+        set_tstatus(tid, u, "pending")
+    setup = ctx.bot_data.pop(f"gm_{tid}", None)
+    if setup:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=int(setup["c"]), message_id=setup["m"], reply_markup=None)
+        except Exception:
+            pass
+    try:
+        status = await ctx.bot.send_message(chat_id=int(gid), text=gstatus_text(tid, msg), parse_mode="HTML")
+        ctx.bot_data[f"gs_{tid}"] = {"c": int(gid), "m": status.message_id}
+    except Exception as e:
+        logger.error(f"[FIRE] Group {gid}: {e}")
+    for u, n in active:
+        if not await send_and_track(ctx, int(u), f"{msg}\n\n<b>⏰ Group Reminder</b>", gact_kb(tid), f"gpm_{tid}_{u}", int(u)):
+            set_tstatus(tid, u, "missed")
+    sheet.update_cell(row, 6, "pending")
+    sheet.update_cell(row, 7, 0)
+    ctx.job_queue.run_once(grp_retry, cfg.get("retry_gap", DEF_RETRY_GAP) * 60,
+                           data={"tid": tid, "row": row, "gid": gid}, name=f"gretry-{tid}")
+
+async def grp_retry(ctx: ContextTypes.DEFAULT_TYPE):
+    tid, row, gid = ctx.job.data["tid"], ctx.job.data["row"], ctx.job.data["gid"]
+    try:
+        r = sheet.row_values(row)
+    except Exception as e:
+        logger.error(f"[GRETRY] {row}: {e}")
+        return
+    if not r or len(r) <= 5 or r[5] != "pending":
+        return
+    creator = int(r[0]) if r[0].isdigit() else r[0]
+    cfg = get_cfg(creator)
+    max_r, gap = cfg["max_retries"], cfg["retry_gap"]
+    count = int(r[6]) if len(r) > 6 and r[6].isdigit() else 0
+    pending = [(u, n) for u, n, s in get_tmembers(tid) if s == "pending"]
+    msg = str(r[1]).strip()
+    if not pending or count >= max_r:
+        for u, n in pending:
+            set_tstatus(tid, u, "missed")
+        await update_gstatus(ctx, tid, msg)
+        await check_grp_resolved(ctx, tid, row, r)
+        return
+    nc = count + 1
+    for u, n in pending:
+        await rm_gpm(ctx, tid, u)
+        if not await send_and_track(ctx, int(u), f"{msg}\n\n<b>Group Reminder</b> ({nc}/{max_r})", gact_kb(tid), f"gpm_{tid}_{u}", int(u)):
+            set_tstatus(tid, u, "missed")
+    sheet.update_cell(row, 7, nc)
+    await update_gstatus(ctx, tid, msg)
+    if nc >= max_r:
+        for u, n in pending:
+            set_tstatus(tid, u, "missed")
+        await update_gstatus(ctx, tid, msg)
+        await check_grp_resolved(ctx, tid, row, r)
+    else:
+        ctx.job_queue.run_once(grp_retry, gap * 60, data={"tid": tid, "row": row, "gid": gid}, name=f"gretry-{tid}")
+
+# ============= For Uptime Trigger ======================
+from flask import Flask
+import threading
+
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def home():
+    return "Bot is alive!"
+
+def run_web():
+    app_flask.run(host="0.0.0.0", port=10000)
 
 # ============= MAIN ======================
 def main():
@@ -1743,11 +2080,11 @@ def main():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(on_btn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    # Keep existing job queue runs
-    app.job_queue.run_repeating(check_reminder, interval=60, first=0)
+    app.job_queue.run_repeating(check_reminders, interval=60, first=0)
     app.job_queue.run_repeating(check_digest, interval=60, first=10)
     app.job_queue.run_repeating(check_weekly_report, interval=60, first=20)
     print("RemindX Bot Running")
+    threading.Thread(target=run_web).start()
     app.run_polling()
 
 if __name__ == "__main__":
