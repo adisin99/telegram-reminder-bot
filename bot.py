@@ -1744,7 +1744,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_btn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     # Keep existing job queue runs
-    app.job_queue.run_repeating(check_reminders, interval=60, first=0)
+    app.job_queue.run_repeating(check_reminder, interval=60, first=0)
     app.job_queue.run_repeating(check_digest, interval=60, first=10)
     app.job_queue.run_repeating(check_weekly_report, interval=60, first=20)
     print("RemindX Bot Running")
