@@ -32,9 +32,8 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ================= CONFIG =================
-TOKEN = os.environ.get("BOT_TOKEN")
-SHEET_URL = os.environ.get("SHEET_URL")
-creds_json = os.environ.get("GOOGLE_CREDS")
+TOKEN = "8235103406:AAFYJ2SNRW4A4AAEyz8t2h-5BeYk8rnzzwE"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1bHeyDgw9P-3iRLOp_6VpHGKSn9St6yjyqP-35hPg6Rs/edit?pli=1&gid=0#gid=0"
 
 DIV = "━━━━━━━━━━━━━━━━━━━━"
 AUTO_MIN_SEC = 180  # 3 minutes
@@ -79,13 +78,6 @@ TZ_DATA = [
     ("Africa/Johannesburg", "S. Africa", "+2", "Africa"),
 ]
 
-IGNORE_WORDS = {
-    'hi', 'hello', 'hey', 'yo', 'thanks', 'thank', 'thank you', 'ty', 'thx',
-    'ok', 'okay', 'k', 'kk', 'yes', 'yeah', 'yep', 'yup', 'y', 'no', 'nah', 'nope', 'n',
-    'bye', 'goodbye', 'cya', 'see you', 'good morning', 'good night', 'gm', 'gn',
-    'lol', 'haha', 'hehe', 'what', 'why', 'how', 'when', 'where', 'help', '?'
-}
-
 TZ_REGIONS = list(dict.fromkeys(t[3] for t in TZ_DATA))
 TZ_ICONS = {"Asia": "🌏", "Europe": "🌍", "Americas": "🌎", "Oceania": "🌏", "Africa": "🌍"}
 
@@ -95,8 +87,9 @@ logger = logging.getLogger(__name__)
 
 # ============= GOOGLE SHEET ==============
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-if not TOKEN or not SHEET_URL or not creds_json:
-    raise Exception("Missing env vars")
+creds_json = os.environ.get("GOOGLE_CREDS")
+if not creds_json:
+    raise Exception("GOOGLE_CREDS missing")
 credentials = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(creds_json), scope)
 client = gspread.authorize(credentials)
 workbook = client.open_by_url(SHEET_URL)
@@ -113,235 +106,1572 @@ sheet = get_or_create_sheet("Reminders", ["user_id", "message", "date", "time", 
 cfg_sheet = get_or_create_sheet("Settings", ["user_id", "digest_on", "digest_time", "max_retries", "retry_gap", "timezone", "username"])
 grp_sheet = get_or_create_sheet("GroupMembers", ["group_id", "user_id", "first_name", "username", "subscribed"])
 task_sheet = get_or_create_sheet("TaskMembers", ["task_id", "user_id", "first_name", "status"])
+digest_archive_sheet = get_or_create_sheet("DigestArchive", ["user_id", "date", "count", "digest_text"])
+weekly_archive_sheet = get_or_create_sheet("WeeklyArchive", ["user_id", "week_start", "week_end", "done", "missed", "total", "report_text"])
+monthly_archive_sheet = get_or_create_sheet("MonthlyArchive", ["user_id", "year", "month", "done", "missed", "snoozed", "total", "stats_json"])
 
-# ============= FORMATTERS & HELPERS ================
-def hdr(t): return f"<b>{t}</b>\n{DIV}"
+# ============= FORMATTERS ================
+def hdr(t):
+    return f"<b>{t}</b>\n{DIV}"
+
+def detail(msg, ds, ts, rs=None):
+    p = [fmt_date(ds), fmt_time(ts)]
+    if rs:
+        p.append(rs)
+    return f"{msg}\n{' · '.join(p)}"
+
+def fmt_date(ds):
+    try:
+        return datetime.strptime(norm_date(ds), "%Y-%m-%d").strftime("%-d %b")
+    except Exception:
+        return str(ds)
+
+def fmt_time(ts):
+    try:
+        h, m = map(int, norm_time(ts).split(":"))
+        return f"{h % 12 or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+    except Exception:
+        return str(ts)
+
 ST_IC = {"active": "○", "pending": "●", "missed": "✗", "snoozed": "◷", "done": "✅", "cancelled": "✕"}
+ST_LB = {"active": "Active", "pending": "Pending", "missed": "Missed", "snoozed": "Snoozed", "done": "Done", "cancelled": "Cancelled"}
+GT_IC = {"waiting": "⏳", "pending": "⏳", "done": "✅", "snoozed": "◷", "missed": "✗"}
 
-# (Keep all your existing formatters, normalizers, get_cfg, save_cfg, etc. — unchanged)
-# ... [all your existing helper functions remain exactly the same] ...
+def fmt_rep(r):
+    s = str(r)
+    if s.startswith("custom:"):
+        days = s.split(":")[1].split(",") if ":" in s else []
+        if not days:
+            return "Custom"
+        if days == ["mon", "tue", "wed", "thu", "fri"]:
+            return "Mon–Fri"
+        if days == ["sat", "sun"]:
+            return "Weekends"
+        if days == DAY_KEYS:
+            return "Every day"
+        return ", ".join(d.capitalize() for d in days)
+    return {"none": "Once", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}.get(s, s)
 
-# ============= HOME SCREEN — NEW CLEAN VERSION ================
+def fmt_snz(m):
+    return f"{m} min" if m < 60 else f"{m // 60} hr{'s' if m >= 120 else ''}"
+
+def tz_label(n):
+    for tz, c, _, _ in TZ_DATA:
+        if tz == n:
+            return c
+    return n.split("/")[-1].replace("_", " ")
+
+def tz_short(n):
+    for tz, c, o, _ in TZ_DATA:
+        if tz == n:
+            return f"{c} ({o})"
+    return n.split("/")[-1].replace("_", " ")
+
+# ============= NORMALIZERS ================
+def norm_date(val):
+    s = str(val).strip()
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    for f in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, f).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    try:
+        n = float(s)
+        if 1 < n < 100000:
+            return (datetime(1899, 12, 30) + timedelta(days=int(n))).strftime("%Y-%m-%d")
+    except (ValueError, OverflowError):
+        pass
+    return s
+
+def norm_time(val):
+    s = str(val).strip()
+    if ":" in s:
+        try:
+            p = s.split(":")
+            h, m = int(p[0]), int(p[1].split()[0])
+            u = s.upper()
+            if "PM" in u and h != 12:
+                h += 12
+            elif "AM" in u and h == 12:
+                h = 0
+            return f"{h:02d}:{m:02d}"
+        except (ValueError, IndexError):
+            return s
+    try:
+        t = round(float(s) * 24 * 60)
+        return f"{t // 60:02d}:{t % 60:02d}"
+    except ValueError:
+        return s
+
+# ============= HELPERS ====================
+def get_tz(uid):
+    try:
+        return pytz.timezone(get_cfg(uid).get("timezone", DEF_TZ))
+    except Exception:
+        return pytz.timezone(DEF_TZ)
+
+def safe_tz(n):
+    try:
+        return pytz.timezone(n)
+    except Exception:
+        return pytz.timezone(DEF_TZ)
+
+def get_cfg(uid):
+    uid_s = str(uid)
+    try:
+        rows = cfg_sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            rows = cfg_sheet.get_all_values()
+        except Exception:
+            return {"digest_on": True, "digest_time": DEF_DIGEST_TIME, "max_retries": DEF_RETRIES, "retry_gap": DEF_RETRY_GAP, "timezone": DEF_TZ}
+    for r in rows[1:]:
+        if str(r[0]) == uid_s:
+            return {
+                "digest_on": str(r[1]).lower() != "false",
+                "digest_time": norm_time(r[2]) if r[2] else DEF_DIGEST_TIME,
+                "max_retries": int(r[3]) if r[3] else DEF_RETRIES,
+                "retry_gap": int(r[4]) if r[4] else DEF_RETRY_GAP,
+                "timezone": str(r[5]) if len(r) > 5 and r[5] else DEF_TZ,
+            }
+    cfg_sheet.append_row([uid_s, "true", DEF_DIGEST_TIME, DEF_RETRIES, DEF_RETRY_GAP, DEF_TZ, ""], value_input_option="RAW")
+    return {"digest_on": True, "digest_time": DEF_DIGEST_TIME, "max_retries": DEF_RETRIES, "retry_gap": DEF_RETRY_GAP, "timezone": DEF_TZ}
+
+def save_cfg(uid, field, value):
+    uid_s = str(uid)
+    col = {"digest_on": 2, "digest_time": 3, "max_retries": 4, "retry_gap": 5, "timezone": 6}.get(field)
+    if not col:
+        return
+    try:
+        rows = cfg_sheet.get_all_values()
+    except Exception:
+        return
+    for i, r in enumerate(rows[1:], 2):
+        if str(r[0]) == uid_s:
+            cfg_sheet.update_cell(i, col, str(value))
+            return
+    get_cfg(uid)
+    try:
+        rows = cfg_sheet.get_all_values()
+    except Exception:
+        return
+    for i, r in enumerate(rows[1:], 2):
+        if str(r[0]) == uid_s:
+            cfg_sheet.update_cell(i, col, str(value))
+            return
+
+def update_username(uid, username):
+    if not username:
+        return
+    uid_s, uname = str(uid), username.lower().strip()
+    try:
+        rows = cfg_sheet.get_all_values()
+    except Exception:
+        return
+    for i, r in enumerate(rows[1:], 2):
+        if str(r[0]) == uid_s:
+            current = r[6].strip().lower() if len(r) > 6 else ""
+            if current != uname:
+                if len(r) < 7:
+                    cfg_sheet.update_cell(i, 7, uname)
+                else:
+                    cfg_sheet.update_cell(i, 7, uname)
+            return
+    get_cfg(uid)
+    try:
+        rows = cfg_sheet.get_all_values()
+    except Exception:
+        return
+    for i, r in enumerate(rows[1:], 2):
+        if str(r[0]) == uid_s:
+            cfg_sheet.update_cell(i, 7, uname)
+            return
+
+def get_detail(r):
+    return (
+        str(r[1]).strip() if len(r) > 1 else "",
+        norm_date(r[2]) if len(r) > 2 else "",
+        norm_time(r[3]) if len(r) > 3 else "",
+        fmt_rep(r[4]) if len(r) > 4 else "",
+    )
+
+def row_detail(row):
+    r = sheet.row_values(row)
+    return (r, *get_detail(r))
+
+def is_past(ds, ts, tz=None):
+    now = datetime.now(tz or safe_tz(DEF_TZ))
+    try:
+        d = datetime.strptime(norm_date(ds), "%Y-%m-%d").date()
+        if d != now.date():
+            return d < now.date()
+        h, m = map(int, norm_time(ts).split(":"))
+        return now > now.replace(hour=h, minute=m, second=0, microsecond=0)
+    except Exception:
+        return False
+
+def past_msg(ts):
+    return f"⚠ {fmt_time(ts)} has already passed today."
+
+def is_custom_day_match(rep, now):
+    if not str(rep).startswith("custom:"):
+        return True
+    days = str(rep).split(":")[1].split(",") if ":" in str(rep) else []
+    today_abbr = now.strftime("%a").lower()[:3]
+    return today_abbr in days
+
+def advance_rep(row, r):
+    rep = r[4] if len(r) > 4 else "none"
+    if not rep or rep == "none":
+        return False
+    d = datetime.strptime(norm_date(r[2]), "%Y-%m-%d")
+    if rep == "daily":
+        nd = d + timedelta(days=1)
+    elif rep == "weekly":
+        nd = d + timedelta(days=7)
+    elif rep == "monthly":
+        mo, yr = d.month + 1, d.year
+        if mo > 12:
+            mo, yr = 1, yr + 1
+        nd = d.replace(year=yr, month=mo)
+    elif rep.startswith("custom:"):
+        days = rep.split(":")[1].split(",") if ":" in rep else []
+        if not days:
+            return False
+        for offset in range(1, 8):
+            candidate = d + timedelta(days=offset)
+            if candidate.strftime("%a").lower()[:3] in days:
+                nd = candidate
+                break
+        else:
+            return False
+    else:
+        return False
+    sheet.update_cell(row, 3, nd.strftime("%Y-%m-%d"))
+    sheet.update_cell(row, 6, "active")
+    sheet.update_cell(row, 7, 0)
+    return True
+
+def kill_jobs(jq, name_prefix):
+    for n in [f"retry-{name_prefix}", f"snooze-{name_prefix}"] if isinstance(name_prefix, int) else [name_prefix]:
+        for j in jq.get_jobs_by_name(n):
+            j.schedule_removal()
+
+# ============= GROUP DATA =================
+def gen_tid():
+    return f"t{int(time_module.time())}"
+
+def grp_read(sheet_ref, filter_fn):
+    try:
+        rows = sheet_ref.get_all_values()
+    except Exception:
+        return []
+    return [r for r in rows[1:] if filter_fn(r)]
+
+def get_gsubs(gid):
+    return [(r[1], r[2], r[3] if len(r) > 4 else "") for r in grp_read(grp_sheet, lambda r: str(r[0]) == str(gid) and str(r[4] if len(r) > 4 else r[3]).lower() == "true")]
+
+def set_gsub(gid, uid, name, username="", sub=True):
+    gid_s, uid_s = str(gid), str(uid)
+    uname = username.lower().strip() if username else ""
+    try:
+        rows = grp_sheet.get_all_values()
+    except Exception:
+        rows = [["h"]]
+    for i, r in enumerate(rows[1:], 2):
+        if str(r[0]) == gid_s and str(r[1]) == uid_s:
+            grp_sheet.update_cell(i, 3, name)
+            if uname:
+                grp_sheet.update_cell(i, 4, uname)
+            grp_sheet.update_cell(i, 5, str(sub).lower())
+            return
+    grp_sheet.append_row([gid_s, uid_s, name, uname, str(sub).lower()], value_input_option="RAW")
+
+def get_tmembers(tid):
+    return [(r[1], r[2], r[3]) for r in grp_read(task_sheet, lambda r: str(r[0]) == str(tid))]
+
+def add_tmember(tid, uid, name, st="waiting"):
+    uid_s = str(uid)
+    try:
+        rows = task_sheet.get_all_values()
+    except Exception:
+        rows = [["h"]]
+    if any(str(r[0]) == str(tid) and str(r[1]) == uid_s for r in rows[1:]):
+        return False
+    task_sheet.append_row([str(tid), uid_s, name, st], value_input_option="RAW")
+    return True
+
+def set_tstatus(tid, uid, st):
+    uid_s = str(uid)
+    try:
+        rows = task_sheet.get_all_values()
+    except Exception:
+        return
+    for i, r in enumerate(rows[1:], 2):
+        if str(r[0]) == str(tid) and str(r[1]) == uid_s:
+            task_sheet.update_cell(i, 4, st)
+            return
+
+def find_by_tid(tid):
+    try:
+        rows = sheet.get_all_values()
+    except Exception:
+        return None, None
+    for i, r in enumerate(rows[1:], 2):
+        if len(r) > 8 and str(r[8]) == str(tid):
+            return i, r
+    return None, None
+
+def gstatus_text(tid, msg):
+    ms = get_tmembers(tid)
+    active = [(u, n, s) for u, n, s in ms if s != "skipped"]
+    if not active:
+        return f"⏰ {msg}\n\nNo subscribers"
+    if all(s in ("done", "missed") for _, _, s in active):
+        if all(s == "done" for _, _, s in active):
+            return f"{msg}\n\n✅ All done · {', '.join(n for _, n, _ in active)}"
+    default_icon = "⏳"
+    prefix = "⏰ " if any(s not in ("done", "missed") for _, _, s in active) else ""
+    parts = [f"{GT_IC.get(s, default_icon)} {n}" for _, n, s in active]
+    return f"{prefix}{msg}\n\n{' · '.join(parts)}"
+
+def gsub_text(tid):
+    active = [(u, n) for u, n, s in get_tmembers(tid) if s != "skipped"]
+    return f"{len(active)} subscribed: {', '.join(n for _, n in active)}" if active else "0 subscribed"
+
+async def update_gstatus(ctx, tid, msg):
+    info = ctx.bot_data.get(f"gs_{tid}")
+    if not info:
+        return
+    try:
+        await ctx.bot.edit_message_text(chat_id=info["c"], message_id=info["m"], text=gstatus_text(tid, msg), parse_mode="HTML")
+    except Exception:
+        pass
+
+async def check_grp_resolved(ctx, tid, row, r):
+    active = [(u, n, s) for u, n, s in get_tmembers(tid) if s != "skipped"]
+    if not active or not all(s in ("done", "missed") for _, _, s in active):
+        return
+    for j in ctx.job_queue.get_jobs_by_name(f"gretry-{tid}"):
+        j.schedule_removal()
+    if not advance_rep_grp(row, r, tid):
+        sheet.update_cell(row, 6, "done")
+        sheet.update_cell(row, 7, 0)
+
+def advance_rep_grp(row, r, tid):
+    if not advance_rep(row, r):
+        return False
+    try:
+        rows = task_sheet.get_all_values()
+    except Exception:
+        return True
+    for i, tr in enumerate(rows[1:], 2):
+        if str(tr[0]) == str(tid) and str(tr[3]) != "skipped":
+            task_sheet.update_cell(i, 4, "waiting")
+    return True
+
+# ============= TAG EXTRACTION =========
+def extract_tags(message):
+    tags = []
+    if not message.entities:
+        return tags
+    for entity in message.entities:
+        if entity.type == "text_mention" and entity.user:
+            if entity.user.first_name:
+                tags.append(entity.user.first_name.lower().strip())
+            if entity.user.username:
+                tags.append(entity.user.username.lower().strip())
+        elif entity.type == "mention":
+            raw = (message.text or "")[entity.offset:entity.offset + entity.length]
+            clean = raw.lstrip("@").lower().strip()
+            if clean:
+                tags.append(clean)
+    return tags
+
+def strip_mentions(text, message):
+    if not message.entities:
+        return text
+    for entity in sorted(message.entities, key=lambda e: e.offset, reverse=True):
+        if entity.type in ("mention", "text_mention"):
+            mt = (message.text or "")[entity.offset:entity.offset + entity.length]
+            text = text.replace(mt, "", 1)
+    return re.sub(r'\s+', ' ', text).strip()
+
+# ============= MESSAGE UTILS =============
+async def safe_edit(msg, text, kb=None):
+    try:
+        await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
+
+async def rm_prompt(ctx, ud):
+    mid, cid = ud.pop("p_mid", None), ud.pop("p_cid", None)
+    if mid and cid:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=cid, message_id=mid, reply_markup=None)
+        except Exception:
+            pass
+
+async def del_prompt(ctx, ud):
+    mid, cid = ud.pop("p_mid", None), ud.pop("p_cid", None)
+    if mid and cid:
+        try:
+            await ctx.bot.delete_message(chat_id=cid, message_id=mid)
+        except Exception:
+            pass
+
+def save_p(ud, msg):
+    ud["p_mid"], ud["p_cid"] = msg.message_id, msg.chat.id
+
+async def rm_btns(ctx, row):
+    prev = ctx.bot_data.pop(f"r_{row}", None)
+    if prev:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=prev["c"], message_id=prev["m"], reply_markup=None)
+        except Exception:
+            pass
+
+async def rm_home(ctx, ud):
+    mid, cid = ud.pop("h_mid", None), ud.pop("h_cid", None)
+    if mid and cid:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=cid, message_id=mid, reply_markup=None)
+        except Exception:
+            pass
+
+def save_home(ud, msg):
+    ud["h_mid"], ud["h_cid"] = msg.message_id, msg.chat.id
+
+async def rm_gpm(ctx, tid, uid_s):
+    old = ctx.bot_data.pop(f"gpm_{tid}_{uid_s}", None)
+    if old:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=old["c"], message_id=old["m"], reply_markup=None)
+        except Exception:
+            pass
+
+def get_username(user):
+    return user.username.lower().strip() if user and getattr(user, 'username', None) else ""
+
+async def auto_minimize(ctx: ContextTypes.DEFAULT_TYPE):
+    d = ctx.job.data
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=d["c"], message_id=d["m"],
+            text=d["min_text"],
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=d["show_cb"])]]),
+            parse_mode="HTML")
+    except Exception:
+        pass
+
+def schedule_minimize(ctx, sent, min_text, show_cb, timeout=AUTO_MIN_SEC):
+    ctx.bot_data[f"pmin_{sent.message_id}"] = {"min_text": min_text, "show_cb": show_cb}
+    ctx.job_queue.run_once(auto_minimize, timeout, data={
+        "c": sent.chat.id, "m": sent.message_id,
+        "min_text": min_text, "show_cb": show_cb
+    })
+
+# ============= UI ========================
 HOME_TEXT = (
     f"{hdr('RemindX')}\n"
-    "Just type your reminder:\n\n"
+    "Type your reminder below:\n\n"
     "<i>Buy milk tomorrow at 5pm</i>\n"
     "<i>Gym at 6pm daily</i>\n"
     "<i>Meeting Monday 10am weekly</i>\n"
-    "<i>Call mom in 30 min</i>\n"
+    "<i>Call mom in 30 min</i>\n\n"
+    "Or tap ＋ New for step-by-step."
 )
 
 def home_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("＋ New", callback_data="add")]])
+
+def new_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("＋ New", callback_data="add")]])
+
+def cancel_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✕ Cancel", callback_data="cancel")]])
+
+def close_kb(show_cb):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("— Close", callback_data=f"pclose_{show_cb}")]])
+
+def act_kb(row):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Snooze", callback_data=f"snzp_{row}"), InlineKeyboardButton("Done", callback_data=f"done_{row}")]])
+
+def gact_kb(tid):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Snooze", callback_data=f"gsnzp_{tid}"), InlineKeyboardButton("Done", callback_data=f"gdone_{tid}")]])
+
+def saved_kb(row, rep):
+    r = str(rep)
+    btns = []
+    if r == "none" or not r:
+        btns.append(InlineKeyboardButton("🔁 Repeat", callback_data=f"chrep_{row}"))
+    btns.append(InlineKeyboardButton("✎ Edit", callback_data=f"edit_{row}"))
+    return InlineKeyboardMarkup([btns, [InlineKeyboardButton("＋ New", callback_data="add")]])
+
+def gjoin_kb(tid, show_rep=False):
+    btns = [[InlineKeyboardButton("＋ Count Me In", callback_data=f"gjoin_{tid}"), InlineKeyboardButton("✕ Skip", callback_data=f"gskip_{tid}")]]
+    if show_rep:
+        btns.append([InlineKeyboardButton("🔁 Repeat", callback_data=f"gchrep_{tid}")])
+    return InlineKeyboardMarkup(btns)
+
+def rep_picker_kb(prefix):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ New Reminder", callback_data="add")],
-        [InlineKeyboardButton("📅 Schedule", callback_data="schedule_view")],
-        [InlineKeyboardButton("📊 Insights", callback_data="insights")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="cfg_settings")],
+        [InlineKeyboardButton("Daily", callback_data=f"{prefix}_daily"), InlineKeyboardButton("Weekly", callback_data=f"{prefix}_weekly")],
+        [InlineKeyboardButton("Monthly", callback_data=f"{prefix}_monthly"), InlineKeyboardButton("Customize", callback_data=f"{prefix}_custom")],
     ])
 
-# ============= NEW UNIFIED SCHEDULE VIEW ================
-def build_schedule_month(uid, year, month, utz):
-    txt, kb = build_month_view(uid, year, month, utz, ctx=None)
-    # Insert tab row just above navigation
-    tab_row = [
-        InlineKeyboardButton(" Today ", callback_data="sched_today"),
-        InlineKeyboardButton(" Upcoming ", callback_data="sched_upcoming"),
-    ]
-    kb.inline_keyboard.insert(-1, tab_row)  # before the nav row
-    return txt, kb
+def custom_days_kb(selected, prefix):
+    row1, row2 = [], []
+    for i, (name, key) in enumerate(zip(DAY_NAMES, DAY_KEYS)):
+        lbl = f"[{name}]" if key in selected else name
+        btn = InlineKeyboardButton(lbl, callback_data=f"cday_{prefix}_{key}")
+        if i < 4:
+            row1.append(btn)
+        else:
+            row2.append(btn)
+    btns = [row1, row2]
+    btns.append([
+        InlineKeyboardButton("Mon–Fri", callback_data=f"cday_{prefix}_weekdays"),
+        InlineKeyboardButton("All", callback_data=f"cday_{prefix}_all"),
+        InlineKeyboardButton("Clear", callback_data=f"cday_{prefix}_clear"),
+    ])
+    if selected:
+        btns.append([InlineKeyboardButton("✓ Save", callback_data=f"cdaysave_{prefix}")])
+    btns.append([InlineKeyboardButton("« Back", callback_data=f"cdayback_{prefix}")])
+    return InlineKeyboardMarkup(btns)
 
-async def show_today_digest(target, uid, ctx, from_insights=False):
+def snz_kb(key, pfx="snz"):
+    opts = [(15, "15m"), (30, "30m"), (45, "45m"), (60, "1h"), (120, "2h"), (180, "3h"), (300, "5h"), (480, "8h"), (720, "12h")]
+    kb = [[InlineKeyboardButton(l, callback_data=f"{pfx}_{key}_{m}") for m, l in opts[i:i + 3]] for i in range(0, 9, 3)]
+    kb.append([InlineKeyboardButton("« Back", callback_data=f"{pfx}b_{key}")])
+    return InlineKeyboardMarkup(kb)
+
+def cfg_picker_kb(values, fmt_fn, cur, cb_prefix):
+    btns, row = [], []
+    for v in values:
+        row.append(InlineKeyboardButton(f"[{fmt_fn(v)}]" if v == cur else fmt_fn(v), callback_data=f"{cb_prefix}_{v}"))
+        if len(row) == 3:
+            btns.append(row)
+            row = []
+    if row:
+        btns.append(row)
+    btns.append([InlineKeyboardButton("— Close", callback_data="cfg_close")])
+    return InlineKeyboardMarkup(btns)
+
+def gmin_kb(show_cb):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=show_cb)]])
+
+def gclose_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("— Close", callback_data="gclose")]])
+
+# ============= CALENDAR ==================
+def cal_kb(year, month, back_cb="cancel", back_txt="✕ Cancel", tz=None):
+    now = datetime.now(tz or safe_tz(DEF_TZ))
+    kb = [[InlineKeyboardButton(f"{cal_module.month_name[month]} {year}", callback_data="noop")]]
+    kb.append([InlineKeyboardButton(d, callback_data="noop") for d in "Mo Tu We Th Fr Sa Su".split()])
+    for week in cal_module.monthcalendar(year, month):
+        if not any(d and datetime(year, month, d).date() >= now.date() for d in week if d):
+            continue
+        row = []
+        for day in week:
+            if day == 0 or datetime(year, month, day).date() < now.date():
+                row.append(InlineKeyboardButton(" ", callback_data="noop"))
+            else:
+                ds = f"{year}-{month:02d}-{day:02d}"
+                lbl = f"[{day}]" if datetime(year, month, day).date() == now.date() else str(day)
+                row.append(InlineKeyboardButton(lbl, callback_data=f"day_{ds}"))
+        kb.append(row)
+    td = now.strftime("%Y-%m-%d")
+    tm = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    kb.append([InlineKeyboardButton("Today", callback_data=f"day_{td}"), InlineKeyboardButton("Tomorrow", callback_data=f"day_{tm}")])
+    nm, ny = (month % 12) + 1, year + (1 if month == 12 else 0)
+    pm, py = ((month - 2) % 12) + 1, year - (1 if month == 1 else 0)
+    nav = []
+    if datetime(py, pm, 1) >= datetime(now.year, now.month, 1):
+        nav.append(InlineKeyboardButton("‹", callback_data=f"cal_{py}_{pm:02d}"))
+    else:
+        nav.append(InlineKeyboardButton(" ", callback_data="noop"))
+    nav.append(InlineKeyboardButton("›", callback_data=f"cal_{ny}_{nm:02d}"))
+    kb.append(nav)
+    kb.append([InlineKeyboardButton(back_txt, callback_data=back_cb)])
+    return InlineKeyboardMarkup(kb)
+
+# ============= PARSERS ====================
+def parse_time(text):
+    s = text.strip()
+    for pat, mode in [
+        (r'^(\d{1,2})[:.]\s*(\d{1,2})\s*(am|pm)', 'hma'),
+        (r'^(\d{1,2})\s*(am|pm)', 'ha'),
+        (r'^(\d{1,2})[:.]\s*(\d{1,2})$', '24')
+    ]:
+        m = re.match(pat, s, re.I)
+        if not m:
+            continue
+        if mode == 'hma':
+            h, mi, ap = int(m.group(1)), int(m.group(2)), m.group(3).lower()
+        elif mode == 'ha':
+            h, mi, ap = int(m.group(1)), 0, m.group(2).lower()
+        else:
+            h, mi, ap = int(m.group(1)), int(m.group(2)), None
+        if ap:
+            if ap == 'pm' and h != 12:
+                h += 12
+            elif ap == 'am' and h == 12:
+                h = 0
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return f"{h:02d}:{mi:02d}"
+    return None
+
+def to24(h, mi, ap):
+    if ap.lower() == 'pm' and h != 12:
+        h += 12
+    elif ap.lower() == 'am' and h == 12:
+        h = 0
+    return f"{h:02d}:{mi:02d}" if 0 <= h <= 23 and 0 <= mi <= 59 else None
+
+def find_time(text):
+    for pat, mode in [
+        (r'(?:at|by)\s+(\d{1,2})[:.]\s*(\d{1,2})\s*(am|pm)', 'hma'),
+        (r'(?:at|by)\s+(\d{1,2})\s*(am|pm)', 'ha'),
+        (r'(?:at|by)\s+(\d{1,2}):(\d{2})\b', '24'),
+        (r'(\d{1,2})[:.]\s*(\d{1,2})\s*(am|pm)', 'hma'),
+        (r'(\d{1,2})\s*(am|pm)', 'ha'),
+    ]:
+        m = re.search(pat, text, re.I)
+        if not m:
+            continue
+        if mode == 'hma':
+            t = to24(int(m.group(1)), int(m.group(2)), m.group(3))
+        elif mode == 'ha':
+            t = to24(int(m.group(1)), 0, m.group(2))
+        else:
+            h, mi = int(m.group(1)), int(m.group(2))
+            t = f"{h:02d}:{mi:02d}" if 0 <= h <= 23 and 0 <= mi <= 59 else None
+        if t:
+            return t, m.start(), m.end()
+    return None
+
+def find_relative(text, tz=None):
+    now = datetime.now(tz or safe_tz(DEF_TZ))
+    low = text.lower()
+    m = re.search(r'\b(?:in|after)\s+(\d+)\s*(?:min(?:ute)?s?|m)\b', low)
+    if m:
+        mins = int(m.group(1))
+        if mins > 0:
+            target = now + timedelta(minutes=mins)
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), m.start(), m.end()
+    m = re.search(r'\b(?:in|after)\s+(\d+)\s*(?:hour|hr|h)s?\b', low)
+    if m:
+        hrs = int(m.group(1))
+        if hrs > 0:
+            target = now + timedelta(hours=hrs)
+            return target.strftime("%Y-%m-%d"), target.strftime("%H:%M"), m.start(), m.end()
+    m = re.search(r'\b(?:in|after)\s+(\d+)\s+days?\b', low)
+    if m:
+        days = int(m.group(1))
+        if days > 0:
+            target = now + timedelta(days=days)
+            return target.strftime("%Y-%m-%d"), now.strftime("%H:%M"), m.start(), m.end()
+    m = re.search(r'\b(?:in|after)\s+(\d+)\s+weeks?\b', low)
+    if m:
+        weeks = int(m.group(1))
+        if weeks > 0:
+            target = now + timedelta(weeks=weeks)
+            return target.strftime("%Y-%m-%d"), now.strftime("%H:%M"), m.start(), m.end()
+    return None
+
+def find_date(text, tz=None):
+    now = datetime.now(tz or safe_tz(DEF_TZ))
+    low = text.lower()
+    for pat, delta in [(r'\bday\s+after\s+tomorrow\b', 2), (r'\b(today|tonight)\b', 0), (r'\b(tomorrow|tmrw|tmr)\b', 1), (r'\bnext\s+week\b', 7)]:
+        m = re.search(pat, low)
+        if m:
+            return (now + timedelta(days=delta)).strftime("%Y-%m-%d"), m.start(), m.end()
+    days_full = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+    days_abbr = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+    for i, (full, abr) in enumerate(zip(days_full, days_abbr)):
+        m = re.search(rf'\b(?:on\s+)?({full}|{abr})\b', low)
+        if m:
+            d = (i - now.weekday()) % 7 or 7
+            return (now + timedelta(days=d)).strftime("%Y-%m-%d"), m.start(), m.end()
+    m = re.search(r'(?:on\s+)?(\d{1,2})\s*(?:st|nd|rd|th)\b', low)
+    if m:
+        day = int(m.group(1))
+        if 1 <= day <= 31:
+            try:
+                d = now.replace(day=day)
+                if d.date() < now.date():
+                    mo, yr = now.month + 1, now.year
+                    if mo > 12:
+                        mo, yr = 1, yr + 1
+                    d = d.replace(year=yr, month=mo)
+                return d.strftime("%Y-%m-%d"), m.start(), m.end()
+            except ValueError:
+                pass
+    months_full = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
+    months_abbr = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+    for mi, (mf, ma) in enumerate(zip(months_full, months_abbr), 1):
+        for pt in [rf'\b(?:on\s+)?({mf}|{ma})\s+(\d{{1,2}})\b', rf'\b(?:on\s+)?(\d{{1,2}})\s+({mf}|{ma})\b']:
+            m = re.search(pt, low)
+            if m:
+                g1, g2 = m.group(1), m.group(2)
+                day = int(g2) if g1.isalpha() else int(g1)
+                try:
+                    d = datetime(now.year, mi, day)
+                    if d.date() < now.date():
+                        d = datetime(now.year + 1, mi, day)
+                    return d.strftime("%Y-%m-%d"), m.start(), m.end()
+                except ValueError:
+                    pass
+    return None
+
+def find_repeat(text, tz=None):
+    low = text.lower()
+    now = datetime.now(tz or safe_tz(DEF_TZ))
+    days_full = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+    days_abbr = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+    for i, (full, abr) in enumerate(zip(days_full, days_abbr)):
+        m = re.search(rf'\bevery\s+({full}|{abr})\b', low)
+        if m:
+            d = (i - now.weekday()) % 7
+            if d == 0:
+                d = 0
+            target = (now + timedelta(days=d)).strftime("%Y-%m-%d")
+            return 'weekly', m.start(), m.end(), target
+    for pat, rep in [
+        (r'\b(?:every\s+day|daily|every\s+day)\b', 'daily'),
+        (r'\b(?:every\s+week|weekly|every\s+week)\b', 'weekly'),
+        (r'\b(?:every\s+month|monthly|every\s+month)\b', 'monthly'),
+        (r'\b(?:every\s+hour|hourly)\b', 'daily'),
+        (r'\b(?:once|one[\s-]?time|no\s+repeat)\b', 'none'),
+    ]:
+        m = re.search(pat, low)
+        if m:
+            return rep, m.start(), m.end(), None
+    return None
+
+def clean_text(text, spans):
+    for s, e in sorted([x for x in spans if x], key=lambda x: x[0], reverse=True):
+        text = text[:s] + text[e:]
+    for f in [
+        r'^\s*remind\s+(?:me\s+)?to\s+', r'^\s*reminder\s+to\s+', r'^\s*reminder\s+',
+        r'^\s*remind\s+me\s+', r'^\s*remind\s+to\s+',
+        r'^\s*remember\s+to\s+', r"^\s*don'?t\s+forget\s+to\s+",
+        r'^\s*set\s+(?:a\s+)?reminder\s+(?:to\s+|for\s+)?',
+    ]:
+        text = re.sub(f, '', text, flags=re.I)
+    text = re.sub(r'\s+', ' ', text).strip().strip('.,;:!? ')
+    text = re.sub(r'^\s*on\s+', '', text, flags=re.I).strip()
+    text = re.sub(r'\s+on\s*$', '', text, flags=re.I).strip()
+    return text[0].upper() + text[1:] if text else text
+
+def parse_nl_partial(text, tz=None):
+    rel = find_relative(text, tz)
+    if rel:
+        ds_rel, ts_rel, rs, re = rel
+        rr = find_repeat(text, tz)
+        rep = rr[0] if rr else None
+        spans = [(rs, re)]
+        if rr:
+            spans.append((rr[1], rr[2]))
+        msg = clean_text(text, spans)
+        if not msg:
+            return None
+        return {'message': msg, 'date': ds_rel, 'time': ts_rel, 'repeat': rep}
+
+    tr = find_time(text)
+    dr = find_date(text, tz)
+    rr = find_repeat(text, tz)
+    ts = tr[0] if tr else None
+    ds = dr[0] if dr else None
+    rep = rr[0] if rr else None
+    if rr and len(rr) > 3 and rr[3]:
+        ds = rr[3]
+    spans = []
+    if tr:
+        spans.append((tr[1], tr[2]))
+    if dr:
+        spans.append((dr[1], dr[2]))
+    if rr:
+        spans.append((rr[1], rr[2]))
+    msg = clean_text(text, spans)
+    if not msg:
+        return None
+    return {'message': msg, 'date': ds, 'time': ts, 'repeat': rep}
+
+# ============= ARCHIVE FUNCTIONS ===========
+def save_digest_archive(uid, date_str, count, text):
+    try:
+        digest_archive_sheet.append_row([str(uid), date_str, count, text], value_input_option="RAW")
+    except Exception as e:
+        logger.error(f"[ARCHIVE] Digest save failed: {e}")
+
+def save_weekly_archive(uid, week_start, week_end, done, missed, total, text):
+    try:
+        weekly_archive_sheet.append_row([str(uid), week_start, week_end, done, missed, total, text], value_input_option="RAW")
+    except Exception as e:
+        logger.error(f"[ARCHIVE] Weekly save failed: {e}")
+
+def save_monthly_archive(uid, year, month, done, missed, snoozed, total, stats_json):
+    try:
+        monthly_archive_sheet.append_row([str(uid), year, month, done, missed, snoozed, total, stats_json], value_input_option="RAW")
+    except Exception as e:
+        logger.error(f"[ARCHIVE] Monthly save failed: {e}")
+
+def get_digest_archive(uid, limit=30):
+    try:
+        rows = digest_archive_sheet.get_all_values()
+        uid_s = str(uid)
+        user_digests = [(r[1], r[2], r[3]) for r in rows[1:] if r and str(r[0]) == uid_s]
+        return sorted(user_digests, key=lambda x: x[0], reverse=True)[:limit]
+    except Exception:
+        return []
+
+def get_weekly_archive(uid, limit=12):
+    try:
+        rows = weekly_archive_sheet.get_all_values()
+        uid_s = str(uid)
+        user_weeks = [(r[1], r[2], r[3], r[4], r[5], r[6]) for r in rows[1:] if r and str(r[0]) == uid_s]
+        return sorted(user_weeks, key=lambda x: x[0], reverse=True)[:limit]
+    except Exception:
+        return []
+
+def get_monthly_archive(uid, limit=12):
+    try:
+        rows = monthly_archive_sheet.get_all_values()
+        uid_s = str(uid)
+        user_months = [(r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in rows[1:] if r and str(r[0]) == uid_s]
+        return sorted(user_months, key=lambda x: (x[0], x[1]), reverse=True)[:limit]
+    except Exception:
+        return []
+
+# ============= SCHEDULE VIEWS =============
+def get_user_reminders(uid):
+    try:
+        rows = sheet.get_all_values()
+    except Exception:
+        return []
+    uid_s = str(uid)
+    return [r for r in rows[1:] if len(r) >= 6 and str(r[0]) == uid_s and not (len(r) > 7 and str(r[7]).strip())]
+
+def expand_recur(reminders, start_date, end_date):
+    expanded = []
+    for r in reminders:
+        msg = str(r[1]).strip()
+        ds = norm_date(r[2])
+        ts = norm_time(r[3])
+        rep = str(r[4]).strip() if len(r) > 4 else "none"
+        st = str(r[5]).strip() if len(r) > 5 else "active"
+        try:
+            rem_date = datetime.strptime(ds, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if rep == "none" or not rep:
+            if start_date <= rem_date <= end_date:
+                expanded.append({"date": rem_date, "msg": msg, "time": ts, "rep": rep, "status": st})
+        elif rep == "daily":
+            d = max(rem_date, start_date)
+            while d <= end_date:
+                expanded.append({"date": d, "msg": msg, "time": ts, "rep": rep, "status": st if d == rem_date else "active"})
+                d += timedelta(days=1)
+        elif rep == "weekly":
+            d = rem_date
+            while d <= end_date:
+                if d >= start_date:
+                    expanded.append({"date": d, "msg": msg, "time": ts, "rep": rep, "status": st if d == rem_date else "active"})
+                d += timedelta(days=7)
+        elif rep == "monthly":
+            d = rem_date
+            for _ in range(12):
+                if start_date <= d <= end_date:
+                    expanded.append({"date": d, "msg": msg, "time": ts, "rep": rep, "status": st if d == rem_date else "active"})
+                mo, yr = d.month + 1, d.year
+                if mo > 12:
+                    mo, yr = 1, yr + 1
+                try:
+                    d = d.replace(year=yr, month=mo)
+                except ValueError:
+                    break
+        elif rep.startswith("custom:"):
+            cdays = rep.split(":")[1].split(",") if ":" in rep else []
+            if not cdays:
+                continue
+            d = max(rem_date, start_date)
+            while d <= end_date:
+                if d.strftime("%a").lower()[:3] in cdays:
+                    expanded.append({"date": d, "msg": msg, "time": ts, "rep": rep, "status": st if d == rem_date else "active"})
+                d += timedelta(days=1)
+    return expanded
+
+async def show_today_view(target, uid, ctx, new=False):
     utz = get_tz(uid)
     now = datetime.now(utz)
-    today = now.strftime("%Y-%m-%d")
-    rows = sheet.get_all_values()
-    todays = [r for r in rows[1:] 
-              if len(r) >= 6 and str(r[0]) == str(uid) and norm_date(r[2]) == today 
-              and r[5] in ("active", "pending", "snoozed")]
-    todays.sort(key=lambda x: norm_time(x[3]))
-
-    lines = [f"Today's Reminders · {now.strftime('%-d %b')}\n{DIV}\n"]
-    if todays:
-        btns = []
-        row_buttons = []
-        for i, r in enumerate(todays, 1):
-            row_idx = rows.index(r) + 2  # correct row number
-            msg = r[1][:45] + ("…" if len(r[1]) > 45 else "")
-            lines.append(f"{i}. {ST_IC.get(r[5], '○')} {fmt_time(norm_time(r[3]))} · {msg}")
-            row_buttons.append(InlineKeyboardButton(str(i), callback_data=f"view_{row_idx}"))
-            if len(row_buttons) == 6:
-                btns.append(row_buttons)
-                row_buttons = []
-        if row_buttons:
-            btns.append(row_buttons)
-        back_cb = "insights" if from_insights else "schedule_view"
-        btns.append([InlineKeyboardButton("← Back", callback_data=back_cb)])
-        kb = InlineKeyboardMarkup(btns)
+    today = now.date()
+    
+    reminders = get_user_reminders(uid)
+    expanded = expand_recur(reminders, today, today)
+    expanded.sort(key=lambda x: x["time"])
+    
+    today_str = now.strftime("%-d %b")
+    lines = [f"📅 <b>Today — {today_str}</b>\n{DIV}\n"]
+    
+    if expanded:
+        for item in expanded:
+            ic = ST_IC.get(item["status"], "○")
+            rep_suffix = f" · {fmt_rep(item['rep'])}" if item["rep"] and item["rep"] != "none" else ""
+            short_msg = item["msg"][:30] + "…" if len(item["msg"]) > 30 else item["msg"]
+            lines.append(f"{ic} {fmt_time(item['time'])} · {short_msg}{rep_suffix}")
+        lines.append(f"\n{len(expanded)} reminder{'s' if len(expanded) != 1 else ''} today")
     else:
-        lines.append("No reminders today — enjoy your free day! 🎉")
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("← Back", callback_data="schedule_view" if not from_insights else "insights")]])
+        lines.append("No reminders today. Enjoy your day!")
+    
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    btns = [
+        [InlineKeyboardButton("◂ Yesterday", callback_data=f"sched_day_{yesterday}"), 
+         InlineKeyboardButton("Tomorrow ▸", callback_data=f"sched_day_{tomorrow}")],
+        [InlineKeyboardButton("📆 Week", callback_data="sched_week"),
+         InlineKeyboardButton("📊 Month", callback_data="sched_month"),
+         InlineKeyboardButton("📋 All", callback_data="sched_all")],
+        [InlineKeyboardButton("＋ New", callback_data="add")]
+    ]
+    
+    show_cb = "sched_today"
+    txt = "\n".join(lines)
+    
+    if new:
+        sent = await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+        schedule_minimize(ctx, sent, f"<b>📅 Today</b> ({len(expanded)})", show_cb)
+    else:
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
 
-    await safe_edit(target, "\n".join(lines), kb)
+async def show_week_view(target, uid, ctx, week_offset=0, new=False):
+    utz = get_tz(uid)
+    now = datetime.now(utz)
+    week_start = (now - timedelta(days=now.weekday()) + timedelta(weeks=week_offset)).date()
+    week_end = week_start + timedelta(days=6)
+    
+    reminders = get_user_reminders(uid)
+    expanded = expand_recur(reminders, week_start, week_end)
+    
+    by_date = {}
+    for item in expanded:
+        by_date.setdefault(item["date"], []).append(item)
+    
+    lines = [f"📆 <b>This Week — {week_start.strftime('%-d %b')}–{week_end.strftime('%-d %b')}</b>\n{DIV}\n"]
+    
+    done_count = sum(1 for x in expanded if x["status"] == "done")
+    missed_count = sum(1 for x in expanded if x["status"] == "missed")
+    upcoming = len(expanded) - done_count - missed_count
+    
+    d = week_start
+    day_btns = []
+    for i in range(7):
+        current_day = d + timedelta(days=i)
+        day_items = by_date.get(current_day, [])
+        day_name = current_day.strftime("%a %-d")
+        marker = " ◂" if current_day == now.date() else ""
+        lines.append(f"{day_name}{marker} · {len(day_items)} reminder{'s' if len(day_items) != 1 else ''}")
+        day_btns.append(InlineKeyboardButton(DAY_NAMES[i], callback_data=f"sched_day_{current_day.strftime('%Y-%m-%d')}"))
+    
+    lines.append(f"\nTotal: {len(expanded)}")
+    if done_count or missed_count or upcoming:
+        parts = []
+        if done_count:
+            parts.append(f"✅ {done_count} done")
+        if missed_count:
+            parts.append(f"✗ {missed_count} missed")
+        if upcoming:
+            parts.append(f"○ {upcoming} upcoming")
+        lines.append(" · ".join(parts))
+    
+    btns = [day_btns[i:i+4] for i in range(0, 7, 4)]
+    btns.append([InlineKeyboardButton("◂ Last", callback_data=f"sched_week_{week_offset - 1}"),
+                 InlineKeyboardButton("Next ▸", callback_data=f"sched_week_{week_offset + 1}")])
+    btns.append([InlineKeyboardButton("📅 Today", callback_data="sched_today"),
+                 InlineKeyboardButton("📊 Month", callback_data="sched_month"),
+                 InlineKeyboardButton("📋 All", callback_data="sched_all")])
+    
+    show_cb = f"sched_week_{week_offset}"
+    txt = "\n".join(lines)
+    
+    if new:
+        sent = await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+        schedule_minimize(ctx, sent, f"<b>📆 Week</b> ({len(expanded)})", show_cb)
+    else:
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
 
-async def show_upcoming_list(target, uid, ctx):
-    rows = sheet.get_all_values()
-    upcoming = [r for r in rows[1:] 
-                if len(r) >= 6 and str(r[0]) == str(uid) and r[5] in ("active", "pending", "snoozed")]
-    upcoming.sort(key=lambda x: (norm_date(x[2]), norm_time(x[3])))
-
-    if not upcoming:
-        await safe_edit(target, f"{hdr('Upcoming')}\nNo upcoming reminders.", 
-                        InlineKeyboardMarkup([[InlineKeyboardButton("← Schedule", callback_data="schedule_view")]]))
+async def show_day_detail(target, uid, ctx, date_str):
+    utz = get_tz(uid)
+    now = datetime.now(utz)
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except Exception:
         return
+    
+    reminders = get_user_reminders(uid)
+    expanded = expand_recur(reminders, day, day)
+    expanded.sort(key=lambda x: x["time"])
+    
+    day_name = "Today" if day == now.date() else day.strftime("%A, %-d %b")
+    lines = [f"<b>{day_name}</b>\n{DIV}\n"]
+    
+    # Get actual row numbers for editing
+    try:
+        all_rows = sheet.get_all_values()
+        uid_s = str(uid)
+        rows_map = {}
+        for idx, r in enumerate(all_rows[1:], 2):
+            if len(r) >= 6 and str(r[0]) == uid_s and not (len(r) > 7 and str(r[7]).strip()):
+                key = (norm_date(r[2]), norm_time(r[3]), str(r[1]).strip())
+                rows_map[key] = idx
+    except Exception:
+        rows_map = {}
+    
+    if expanded:
+        num_btns = []
+        for idx, item in enumerate(expanded, 1):
+            ic = ST_IC.get(item["status"], "○")
+            rep_suffix = f" · {fmt_rep(item['rep'])}" if item["rep"] and item["rep"] != "none" else ""
+            lines.append(f"{idx}. {ic} {fmt_time(item['time'])} · {item['msg']}{rep_suffix}")
+            
+            # Find row number
+            key = (item["date"].strftime("%Y-%m-%d"), item["time"], item["msg"])
+            row_num = rows_map.get(key)
+            if row_num:
+                num_btns.append(InlineKeyboardButton(str(idx), callback_data=f"view_{row_num}"))
+        
+        btn_rows = [num_btns[i:i+5] for i in range(0, len(num_btns), 5)]
+    else:
+        lines.append("No reminders on this day.")
+        btn_rows = []
+    
+    btn_rows.append([InlineKeyboardButton("« Back to Week", callback_data="sched_week")])
+    
+    await safe_edit(target, "\n".join(lines), InlineKeyboardMarkup(btn_rows))
 
-    lines = [hdr("Upcoming Reminders")]
+async def show_month_view(target, uid, ctx, year=None, month=None, new=False):
+    utz = get_tz(uid)
+    now = datetime.now(utz)
+    if year is None:
+        year = now.year
+    if month is None:
+        month = now.month
+    
+    first_day = datetime(year, month, 1).date()
+    last_day = datetime(year, month, cal_module.monthrange(year, month)[1]).date()
+    
+    reminders = get_user_reminders(uid)
+    expanded = expand_recur(reminders, first_day, last_day)
+    
+    # Build weeks
+    weeks = []
+    d = first_day
+    while d <= last_day:
+        week_start = d
+        week_end = min(d + timedelta(days=6 - d.weekday()), last_day)
+        week_items = [x for x in expanded if week_start <= x["date"] <= week_end]
+        weeks.append({"start": week_start, "end": week_end, "count": len(week_items)})
+        d = week_end + timedelta(days=1)
+    
+    # Merge to max 4 weeks
+    while len(weeks) > 4:
+        w1 = weeks[-2]
+        w2 = weeks[-1]
+        weeks[-2] = {"start": w1["start"], "end": w2["end"], "count": w1["count"] + w2["count"]}
+        weeks.pop()
+    
+    total = len(expanded)
+    done_count = sum(1 for x in expanded if x["status"] == "done")
+    missed_count = sum(1 for x in expanded if x["status"] == "missed")
+    upcoming = total - done_count - missed_count
+    
+    month_name = cal_module.month_name[month]
+    lines = [f"📊 <b>{month_name} {year}</b>\n{DIV}\n"]
+    
+    for i, w in enumerate(weeks):
+        ws = w["start"].strftime("%-d %b")
+        we = w["end"].strftime("%-d %b")
+        current = " ◂" if w["start"] <= now.date() <= w["end"] else ""
+        lines.append(f"W{i + 1}: {ws}–{we}{current} · {w['count']} reminder{'s' if w['count'] != 1 else ''}")
+    
+    if total:
+        lines.append(f"\nTotal: {total}")
+        parts = []
+        if done_count:
+            parts.append(f"✅ {done_count} done")
+        if missed_count:
+            parts.append(f"✗ {missed_count} missed")
+        if upcoming:
+            parts.append(f"○ {upcoming} upcoming")
+        if parts:
+            lines.append(" · ".join(parts))
+    
+    # Week buttons
     btns = []
-    row_buttons = []
-    for idx, r in enumerate(upcoming[:50], 1):
-        row_idx = rows.index(r) + 2
-        rep = fmt_rep(r[4])+ " · " if r[4] != "none" else ""
-        short = r[1][:38] + ("…" if len(r[1]) > 38 else "")
-        lines.append(f"\n<b>{idx}</b> {ST_IC.get(r[5], '○')} {fmt_date(norm_date(r[2]))} {fmt_time(norm_time(r[3]))}\n    {rep}{short}")
-        row_buttons.append(InlineKeyboardButton(str(idx), callback_data=f"view_{row_idx}"))
-        if len(row_buttons) == 5:
-            btns.append(row_buttons)
-            row_buttons = []
-    if row_buttons:
-        btns.append(row_buttons)
-    btns.append([InlineKeyboardButton("← Schedule", callback_data="schedule_view")])
+    week_btns = []
+    for i in range(len(weeks)):
+        week_btns.append(InlineKeyboardButton(str(i + 1), callback_data=f"sched_mw_{year}_{month:02d}_{i}"))
+        if len(week_btns) == 2:
+            btns.append(week_btns)
+            week_btns = []
+    if week_btns:
+        btns.append(week_btns)
+    
+    pm, py = ((month - 2) % 12) + 1, year - (1 if month == 1 else 0)
+    nm, ny = (month % 12) + 1, year + (1 if month == 12 else 0)
+    btns.append([InlineKeyboardButton("‹", callback_data=f"sched_month_{py}_{pm:02d}"),
+                 InlineKeyboardButton("›", callback_data=f"sched_month_{ny}_{nm:02d}")])
+    btns.append([InlineKeyboardButton("📅 Today", callback_data="sched_today"),
+                 InlineKeyboardButton("📆 Week", callback_data="sched_week"),
+                 InlineKeyboardButton("📋 All", callback_data="sched_all")])
+    
+    show_cb = f"sched_month_{year}_{month:02d}"
+    txt = "\n".join(lines)
+    
+    if new:
+        sent = await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+        schedule_minimize(ctx, sent, f"<b>📊 {month_name}</b> ({total})", show_cb)
+    else:
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+
+async def show_month_week_detail(target, uid, ctx, year, month, week_idx):
+    utz = get_tz(uid)
+    now = datetime.now(utz)
+    first_day = datetime(year, month, 1).date()
+    last_day = datetime(year, month, cal_module.monthrange(year, month)[1]).date()
+    
+    weeks = []
+    d = first_day
+    while d <= last_day:
+        week_start = d
+        week_end = min(d + timedelta(days=6 - d.weekday()), last_day)
+        weeks.append((week_start, week_end))
+        d = week_end + timedelta(days=1)
+    
+    while len(weeks) > 4:
+        w1s, w1e = weeks[-2]
+        w2s, w2e = weeks[-1]
+        weeks[-2] = (w1s, w2e)
+        weeks.pop()
+    
+    if week_idx >= len(weeks):
+        return
+    
+    ws, we = weeks[week_idx]
+    reminders = get_user_reminders(uid)
+    expanded = expand_recur(reminders, ws, we)
+    
+    by_date = {}
+    for item in expanded:
+        by_date.setdefault(item["date"], []).append(item)
+    
+    month_name = cal_module.month_name[month]
+    lines = [f"<b>Week {week_idx + 1}</b>: {ws.strftime('%-d %b')}–{we.strftime('%-d %b')}\n{DIV}\n"]
+    
+    d = ws
+    while d <= we:
+        day_items = by_date.get(d, [])
+        if day_items:
+            day_label = f"Today, {d.strftime('%-d %b')}" if d == now.date() else f"{d.strftime('%-d %b, %a')}"
+            lines.append(f"<b>{day_label}</b>")
+            for item in sorted(day_items, key=lambda x: x["time"]):
+                ic = ST_IC.get(item["status"], "○")
+                rep_suffix = f" · {fmt_rep(item['rep'])}" if item["rep"] and item["rep"] != "none" else ""
+                lines.append(f"  {ic} {fmt_time(item['time'])} · {item['msg']}{rep_suffix}")
+            lines.append("")
+        d += timedelta(days=1)
+    
+    if not expanded:
+        lines.append("No reminders this week.")
+    
+    nav_row = []
+    if week_idx > 0:
+        nav_row.append(InlineKeyboardButton(f"‹ W{week_idx}", callback_data=f"sched_mw_{year}_{month:02d}_{week_idx - 1}"))
+    if week_idx < len(weeks) - 1:
+        nav_row.append(InlineKeyboardButton(f"W{week_idx + 2} ›", callback_data=f"sched_mw_{year}_{month:02d}_{week_idx + 1}"))
+    
+    btns = []
+    if nav_row:
+        btns.append(nav_row)
+    btns.append([InlineKeyboardButton(f"« {month_name} {year}", callback_data=f"sched_month_{year}_{month:02d}")])
+    
     await safe_edit(target, "\n".join(lines), InlineKeyboardMarkup(btns))
 
-# ============= INSIGHTS HUB ================
-async def show_insights(target, uid, ctx):
-    txt = f"{hdr('Insights')}\n\n• Today's Digest\n• This Week Report\n• Monthly Report (any month)"
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Today's Digest", callback_data="insight_today")],
-        [InlineKeyboardButton("This Week Report", callback_data="insight_weekly")],
-        [InlineKeyboardButton("Monthly Report", callback_data="insight_month_picker")],
-        [InlineKeyboardButton("🔴 Close", callback_data="cfg_close")],
-    ])
-    await safe_edit(target, txt, kb)
-
-async def send_weekly_report(target, uid, utz, on_demand=False):
-    text = build_weekly_detail(uid, datetime.now(utz), utz)
-    if not text:
-        text = f"{hdr('This Week')}\nNo data yet."
-    await safe_edit(target, text, home_kb())
-
-async def send_monthly_report(target, uid, year, month, utz):
-    first = datetime(year, month, 1).date()
-    last_day = cal_module.monthrange(year, month)[1]
-    last = datetime(year, month, last_day).date()
-    reminders = get_user_reminders(uid)
-    expanded = expand_recur(reminders, first, last)
+async def show_all_view(target, uid, ctx, new=False):
+    try:
+        rows = sheet.get_all_records()
+    except Exception:
+        try:
+            client.login()
+            rows = sheet.get_all_records()
+        except Exception:
+            rows = []
     
-    done = sum(1 for x in expanded if x["status"] == "done")
-    missed = sum(1 for x in expanded if x["status"] == "missed")
-    total = len(expanded)
-    if total == 0:
-        await safe_edit(target, f"{hdr('Monthly Report')}\n{cal_module.month_name[month]} {year}\n\nNo reminders.", home_kb())
+    items = [(i, r) for i, r in enumerate(rows, 2)
+             if str(r.get("user_id", "")) == str(uid) 
+             and str(r.get("status", "")).strip() in ("active", "pending", "missed", "snoozed")
+             and not str(r.get("group_id", "")).strip()]
+    
+    if not items:
+        txt = f"{hdr('All Active Reminders')}\n\nNo reminders found."
+        btns = [[InlineKeyboardButton("📅 Today", callback_data="sched_today"),
+                 InlineKeyboardButton("＋ New", callback_data="add")]]
+        show_cb = "sched_all"
+        if new:
+            sent = await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+            schedule_minimize(ctx, sent, "<b>📋 All</b> (0)", show_cb)
+        else:
+            await safe_edit(target, txt, InlineKeyboardMarkup(btns))
         return
     
-    pct = round(done/total*100) if total else 0
-    mot = "Outstanding! 🏆" if pct>=90 else "Keep it up! 💪" if pct>=70 else "Room to improve 📈" if pct>=50 else "Let's do better 🎯"
+    lines = [hdr("All Active Reminders")]
+    for idx, (ri, r) in enumerate(items, 1):
+        st, msg = str(r.get("status", "")), str(r.get("message", ""))
+        short = msg[:30] + "…" if len(msg) > 30 else msg
+        rep = str(r.get("repeat", ""))
+        rep_suffix = f" · {fmt_rep(rep)}" if rep and rep != "none" else ""
+        lines.append(f"\n<b>{idx}</b> {ST_IC.get(st, '?')} {short}\n   {fmt_date(norm_date(r.get('date', '')))} · {fmt_time(norm_time(r.get('time', '')))}{rep_suffix}")
+    
+    btns, num_row = [], []
+    for idx, (ri, _) in enumerate(items, 1):
+        num_row.append(InlineKeyboardButton(str(idx), callback_data=f"view_{ri}"))
+        if len(num_row) == 5:
+            btns.append(num_row)
+            num_row = []
+    if num_row:
+        btns.append(num_row)
+    
+    btns.append([InlineKeyboardButton("📅 Today", callback_data="sched_today"),
+                 InlineKeyboardButton("📆 Week", callback_data="sched_week"),
+                 InlineKeyboardButton("📊 Month", callback_data="sched_month")])
+    btns.append([InlineKeyboardButton("＋ New", callback_data="add")])
+    
+    show_cb = "sched_all"
+    txt = "\n".join(lines)
+    
+    if new:
+        sent = await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+        schedule_minimize(ctx, sent, f"<b>📋 All</b> ({len(items)})", show_cb)
+    else:
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+
+async def show_history_hub(target, uid, ctx):
+    utz = get_tz(uid)
+    now = datetime.now(utz)
+    
+    # Calculate current stats
+    try:
+        rem_rows = sheet.get_all_values()
+        uid_s = str(uid)
+        
+        # This month
+        month_start = now.replace(day=1).strftime("%Y-%m-%d")
+        month_end = now.strftime("%Y-%m-%d")
+        month_done = sum(1 for r in rem_rows[1:] if len(r) >= 6 and str(r[0]) == uid_s 
+                        and not (len(r) > 7 and str(r[7]).strip())
+                        and month_start <= norm_date(r[2]) <= month_end and str(r[5]).strip() == "done")
+        month_total = sum(1 for r in rem_rows[1:] if len(r) >= 6 and str(r[0]) == uid_s 
+                         and not (len(r) > 7 and str(r[7]).strip())
+                         and month_start <= norm_date(r[2]) <= month_end and str(r[5]).strip() in ("done", "missed"))
+        
+        # This week
+        week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+        week_done = sum(1 for r in rem_rows[1:] if len(r) >= 6 and str(r[0]) == uid_s 
+                       and not (len(r) > 7 and str(r[7]).strip())
+                       and week_start <= norm_date(r[2]) <= month_end and str(r[5]).strip() == "done")
+        week_total = sum(1 for r in rem_rows[1:] if len(r) >= 6 and str(r[0]) == uid_s 
+                        and not (len(r) > 7 and str(r[7]).strip())
+                        and week_start <= norm_date(r[2]) <= month_end and str(r[5]).strip() in ("done", "missed"))
+        
+        # Today pending
+        today = now.strftime("%Y-%m-%d")
+        today_pending = sum(1 for r in rem_rows[1:] if len(r) >= 6 and str(r[0]) == uid_s 
+                           and not (len(r) > 7 and str(r[7]).strip())
+                           and norm_date(r[2]) == today and str(r[5]).strip() in ("active", "pending", "snoozed"))
+        
+        month_pct = f"{month_done}/{month_total} ({round(month_done/month_total*100) if month_total else 0}%)"
+        week_pct = f"{week_done}/{week_total} ({round(week_done/week_total*100) if week_total else 0}%)"
+    except Exception:
+        month_pct = "—"
+        week_pct = "—"
+        today_pending = 0
     
     txt = (
-        f"Monthly Report · {cal_module.month_name[month]} {year}\n{DIV}\n\n"
-        f"✅ {done}/{total} completed ({pct}%)\n"
-        f"❌ {missed} missed\n\n"
-        f"{mot}"
+        f"{hdr('History & Reports')}\n\n"
+        f"📅 Daily Digests ▸\n"
+        f"📊 Weekly Reports ▸\n"
+        f"📈 Monthly Reports ▸\n\n"
+        f"{DIV}\n"
+        f"Current Performance:\n"
+        f"This Month: {month_pct}\n"
+        f"This Week: {week_pct}\n"
+        f"Today: {today_pending} pending"
     )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Detail", callback_data=f"mw_{year}_{month:02d}_0")],
-        [InlineKeyboardButton("← Insights", callback_data="insights")]
-    ])
-    await safe_edit(target, txt, kb)
+    
+    btns = [
+        [InlineKeyboardButton("📅 Daily Digests", callback_data="hist_digest")],
+        [InlineKeyboardButton("📊 Weekly Reports", callback_data="hist_weekly")],
+        [InlineKeyboardButton("📈 Monthly Reports", callback_data="hist_monthly")],
+        [InlineKeyboardButton("— Close", callback_data="stats_close")]
+    ]
+    
+    await safe_edit(target, txt, InlineKeyboardMarkup(btns))
 
-async def post_init(app: Application) -> None:
+async def show_digest_archive(target, uid, ctx):
+    digests = get_digest_archive(uid, limit=30)
+    
+    if not digests:
+        txt = f"{hdr('Daily Digests')}\n\nNo digest history available."
+        btns = [[InlineKeyboardButton("« Back", callback_data="stats_home")]]
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+        return
+    
+    lines = [hdr("Daily Digests")]
+    btns = []
+    
+    utz = get_tz(uid)
+    now = datetime.now(utz)
+    
+    for date_str, count, text_preview in digests[:10]:
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d")
+            label = "Today" if d.date() == now.date() else d.strftime("%a %-d %b")
+            lines.append(f"{label} · {count} reminders")
+            btns.append([InlineKeyboardButton(label, callback_data=f"hist_digest_{date_str}")])
+        except Exception:
+            pass
+    
+    btns.append([InlineKeyboardButton("« Back to Stats", callback_data="stats_home")])
+    
+    await safe_edit(target, "\n".join(lines), InlineKeyboardMarkup(btns))
+
+async def show_digest_detail(target, uid, ctx, date_str):
+    digests = get_digest_archive(uid, limit=30)
+    digest_data = next((d for d in digests if d[0] == date_str), None)
+    
+    if not digest_data:
+        txt = f"{hdr('Daily Digest')}\n\nDigest not found."
+        btns = [[InlineKeyboardButton("« Back", callback_data="hist_digest")]]
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+        return
+    
+    date_str, count, full_text = digest_data
+    
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        day_label = d.strftime("%A, %-d %b")
+    except Exception:
+        day_label = date_str
+    
+    txt = f"☀️ <b>Daily Digest</b>\n{day_label}\n{DIV}\n\n{full_text}"
+    btns = [[InlineKeyboardButton("« Back to Archive", callback_data="hist_digest")]]
+    
+    await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+
+async def show_weekly_archive(target, uid, ctx):
+    weeks = get_weekly_archive(uid, limit=12)
+    
+    if not weeks:
+        txt = f"{hdr('Weekly Reports')}\n\nNo weekly report history available."
+        btns = [[InlineKeyboardButton("« Back", callback_data="stats_home")]]
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+        return
+    
+    lines = [hdr("Weekly Reports")]
+    btns = []
+    
+    utz = get_tz(uid)
+    now = datetime.now(utz)
+    current_week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    
+    for idx, (week_start, week_end, done, missed, total, report_text) in enumerate(weeks[:12], 1):
+        try:
+            ws = datetime.strptime(week_start, "%Y-%m-%d")
+            we = datetime.strptime(week_end, "%Y-%m-%d")
+            label = f"Week {idx} ({ws.strftime('%-d %b')}–{we.strftime('%-d %b')})"
+            marker = " ◂" if week_start == current_week_start else ""
+            lines.append(f"{label}{marker}")
+            btns.append([InlineKeyboardButton(f"{label}{marker}", callback_data=f"hist_weekly_{week_start}")])
+        except Exception:
+            pass
+    
+    btns.append([InlineKeyboardButton("« Back to Stats", callback_data="stats_home")])
+    
+    await safe_edit(target, "\n".join(lines), InlineKeyboardMarkup(btns))
+
+async def show_weekly_detail(target, uid, ctx, week_start):
+    weeks = get_weekly_archive(uid, limit=12)
+    week_data = next((w for w in weeks if w[0] == week_start), None)
+    
+    if not week_data:
+        txt = f"{hdr('Weekly Report')}\n\nReport not found."
+        btns = [[InlineKeyboardButton("« Back", callback_data="hist_weekly")]]
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+        return
+    
+    week_start, week_end, done, missed, total, report_text = week_data
+    
+    txt = report_text if report_text else f"{hdr('Weekly Report')}\n{week_start} — {week_end}\n\nNo data available."
+    btns = [[InlineKeyboardButton("« Back to Archive", callback_data="hist_weekly")]]
+    
+    await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+
+async def show_monthly_archive(target, uid, ctx):
+    months = get_monthly_archive(uid, limit=12)
+    
+    if not months:
+        txt = f"{hdr('Monthly Reports')}\n\nNo monthly report history available."
+        btns = [[InlineKeyboardButton("« Back", callback_data="stats_home")]]
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+        return
+    
+    lines = [hdr("Monthly Reports")]
+    btns = []
+    
+    utz = get_tz(uid)
+    now = datetime.now(utz)
+    
+    for year, month, done, missed, snoozed, total, stats_json in months[:12]:
+        try:
+            month_int = int(month)
+            month_name = cal_module.month_name[month_int]
+            label = f"{month_name} {year}"
+            marker = " ◂" if int(year) == now.year and month_int == now.month else ""
+            lines.append(f"{label}{marker}")
+            btns.append([InlineKeyboardButton(f"{label}{marker}", callback_data=f"hist_monthly_{year}_{month}")])
+        except Exception:
+            pass
+    
+    btns.append([InlineKeyboardButton("« Back to Stats", callback_data="stats_home")])
+    
+    await safe_edit(target, "\n".join(lines), InlineKeyboardMarkup(btns))
+
+async def show_monthly_detail(target, uid, ctx, year, month):
+    months = get_monthly_archive(uid, limit=12)
+    month_data = next((m for m in months if m[0] == str(year) and m[1] == str(month)), None)
+    
+    if month_data:
+        # Use archived data
+        year, month, done, missed, snoozed, total, stats_json = month_data
+        try:
+            done_int, missed_int, snoozed_int, total_int = int(done), int(missed), int(snoozed), int(total)
+            stats = json.loads(stats_json) if stats_json else {}
+        except Exception:
+            done_int, missed_int, snoozed_int, total_int = 0, 0, 0, 0
+            stats = {}
+    else:
+        # Generate from current data
+        try:
+            rem_rows = sheet.get_all_values()
+            uid_s = str(uid)
+            month_int = int(month)
+            year_int = int(year)
+            
+            first_day = datetime(year_int, month_int, 1).strftime("%Y-%m-%d")
+            last_day = datetime(year_int, month_int, cal_module.monthrange(year_int, month_int)[1]).strftime("%Y-%m-%d")
+            
+            done_int = sum(1 for r in rem_rows[1:] if len(r) >= 6 and str(r[0]) == uid_s 
+                          and not (len(r) > 7 and str(r[7]).strip())
+                          and first_day <= norm_date(r[2]) <= last_day and str(r[5]).strip() == "done")
+            missed_int = sum(1 for r in rem_rows[1:] if len(r) >= 6 and str(r[0]) == uid_s 
+                            and not (len(r) > 7 and str(r[7]).strip())
+                            and first_day <= norm_date(r[2]) <= last_day and str(r[5]).strip() == "missed")
+            snoozed_int = sum(1 for r in rem_rows[1:] if len(r) >= 6 and str(r[0]) == uid_s 
+                             and not (len(r) > 7 and str(r[7]).strip())
+                             and first_day <= norm_date(r[2]) <= last_day and str(r[5]).strip() == "snoozed")
+            total_int = done_int + missed_int + snoozed_int
+            stats = {}
+        except Exception:
+            done_int, missed_int, snoozed_int, total_int = 0, 0, 0, 0
+            stats = {}
+    
+    try:
+        month_name = cal_module.month_name[int(month)]
+    except Exception:
+        month_name = month
+    
+    pct = round(done_int / total_int * 100) if total_int else 0
+    
+    txt = (
+        f"📈 <b>Monthly Report</b>\n{month_name} {year}\n{DIV}\n\n"
+        f"Total Reminders: {total_int}\n"
+        f"✅ Completed: {done_int} ({pct}%)\n"
+        f"✗ Missed: {missed_int}\n"
+        f"◷ Snoozed: {snoozed_int}\n"
+    )
+    
+    if stats.get("best_day"):
+        txt += f"\n📅 Most Productive: {stats['best_day']}"
+    if stats.get("worst_day"):
+        txt += f"\n📉 Most Missed: {stats['worst_day']}"
+    
+    btns = [[InlineKeyboardButton("« Back to Archive", callback_data="hist_monthly")]]
+    
+    await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+
+# ============= COMMANDS ===================
+async def post_init(app):
     await app.bot.set_my_commands([
-        BotCommand("start", "Home"),
         BotCommand("add", "New reminder"),
-        BotCommand("remind", "Group reminder"),
-        BotCommand("settings", "Settings"),
+        BotCommand("schedule", "View reminders"),
+        BotCommand("stats", "Reports & history"),
+        BotCommand("settings", "Bot settings"),
         BotCommand("info", "About this bot"),
     ], scope=BotCommandScopeAllPrivateChats())
-    
     await app.bot.set_my_commands([
         BotCommand("start", "Bot info & commands"),
         BotCommand("remind", "Group reminder"),
+        BotCommand("list", "Active reminders"),
     ], scope=BotCommandScopeAllGroupChats())
+    await app.bot.set_my_commands([])
 
-# ============= CALLBACK HANDLER — ADD NEW CASES ================
-async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data
-    uid = q.from_user.id
-    ud = ctx.user_data
+GRP_START = (
+    f"{hdr('RemindX')}\n\n"
+    "<b>Commands</b>\n"
+    "/remind — Group reminder\n"
+    "/list — Active reminders\n\n"
+    "<b>Examples</b>\n"
+    "<code>/remind Buy milk at 5pm</code>\n"
+    "<code>/remind Meeting tomorrow 10am daily</code>\n"
+    "<code>/remind Call mom in 30 min</code>\n"
+    "<code>/remind</code> — step-by-step\n\n"
+    "<i>Tag members to assign:</i>\n"
+    "<code>/remind @user Submit report at 5pm</code>"
+)
 
-    if update.effective_chat.type == "private":
-        update_username(uid, get_username(q.from_user))
+def build_grp_list_text(gid):
+    try:
+        rows = sheet.get_all_values()
+    except Exception:
+        rows = []
+    items = [(i, r) for i, r in enumerate(rows[1:], 2)
+             if len(r) > 7 and str(r[7]).strip() == str(gid) and str(r[5]).strip() in ("active", "pending", "snoozed")]
+    if not items:
+        return None, []
+    lines = [hdr("Group Reminders")]
+    for idx, (ri, r) in enumerate(items, 1):
+        st, msg = str(r[5]).strip(), str(r[1]).strip()
+        short = msg[:30] + "…" if len(msg) > 30 else msg
+        lines.append(f"\n<b>{idx}</b> {ST_IC.get(st, '?')} {short}\n   {fmt_date(norm_date(r[2]))} · {fmt_time(norm_time(r[3]))}")
+    return "\n".join(lines), items
 
-    # === NEW UNIFIED FLOWS ===
-    if data == "schedule_view":
-        utz = get_tz(uid)
-        now = datetime.now(utz)
-        txt, kb = build_schedule_month(uid, now.year, now.month, utz)
-        await safe_edit(q.message, txt, kb)
-        return
-
-    if data == "sched_today":
-        await show_today_digest(q.message, uid, ctx)
-        return
-    if data == "sched_upcoming":
-        await show_upcoming_list(q.message, uid, ctx)
-        return
-    if data.startswith("sched_month_"):
-        parts = data[12:].split("_")
-        y, m = int(parts[0]), int(parts[1])
-        txt, kb = build_schedule_month(uid, y, m, get_tz(uid))
-        await safe_edit(q.message, txt, kb)
-        return
-
-    if data == "insights":
-        await show_insights(q.message, uid, ctx)
-        return
-    if data == "insight_today":
-        await show_today_digest(q.message, uid, ctx, from_insights=True)
-        return
-    if data == "insight_weekly":
-        await send_weekly_report(q.message, uid, get_tz(uid), on_demand=True)
-        return
-    if data == "insight_month_picker":
-        now = datetime.now(get_tz(uid))
-        kb = []
-        row = []
-        for m in range(1,13):
-            name = cal_module.month_name[m][:3]
-            row.append(InlineKeyboardButton(f"{name} {now.year}" if m==now.month else name, 
-                                          callback_data=f"insight_month_{now.year}_{m:02d}"))
-            if len(row)==3:
-                kb.append(row)
-                row=[]
-        if row:
-            kb.append(row)
-        kb.append([InlineKeyboardButton("‹ Previous Year", callback_data=f"insight_month_{now.year-1}_01")])
-        kb.append([InlineKeyboardButton("← Back", callback_data="insights")])
-        await safe_edit(q.message, f"{hdr('Monthly Report')}\nChoose month:", InlineKeyboardMarkup(kb))
-        return
-    if data.startswith("insight_month_"):
-        y, m = map(int, data[14:].split("_"))
-        await send_monthly_report(q.message, uid, y, m, get_tz(uid))
-        return
-
-    # === ALL YOUR EXISTING CALLBACKS BELOW (unchanged) ===
-    # ... keep everything from your original on_btn function exactly as it was ...
-    # (cancel, gclose, pclose_, view_, done_, snz_, edit_, cfg_, etc.)
-
-# ============= START COMMAND — SHOW NEW HOME ================
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        # your existing group start code
+        gid = str(update.effective_chat.id)
+        user = update.effective_user
+        set_gsub(gid, user.id, user.first_name or "User", get_username(user), True)
+        sent = await update.message.reply_text(GRP_START, reply_markup=gclose_kb(), parse_mode="HTML")
+        show_cb = f"gshow_start_{sent.message_id}"
+        ctx.bot_data[f"gmin_{sent.message_id}"] = {"min_text": "<b>RemindX</b>", "show_cb": show_cb, "full_text": GRP_START}
+        ctx.job_queue.run_once(auto_minimize, AUTO_MIN_SEC, data={
+            "c": sent.chat.id, "m": sent.message_id,
+            "min_text": "<b>RemindX</b>", "show_cb": show_cb
+        })
         return
     await rm_home(ctx, ctx.user_data)
     ctx.user_data.clear()
@@ -351,25 +1681,1615 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sent = await update.message.reply_text(HOME_TEXT, reply_markup=home_kb(), parse_mode="HTML")
     save_home(ctx.user_data, sent)
 
-# ============= MAIN ================
+async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("Use /remind here for group reminders.")
+        return
+    await rm_home(ctx, ctx.user_data)
+    ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
+    ctx.user_data["step"] = "message"
+    sent = await update.message.reply_text(f"{hdr('New Reminder')}\nEnter message:", reply_markup=cancel_kb(), parse_mode="HTML")
+    save_p(ctx.user_data, sent)
+
+async def schedule_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Main unified schedule command - defaults to TODAY view"""
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("Use /schedule in private chat.")
+        return
+    await rm_home(ctx, ctx.user_data)
+    ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
+    await show_today_view(update.message, update.effective_user.id, ctx, new=True)
+
+async def stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Stats and history command"""
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("Use /stats in private chat.")
+        return
+    await rm_home(ctx, ctx.user_data)
+    ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
+    await show_history_hub(update.message, update.effective_user.id, ctx)
+
+async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Alias to schedule ALL view for backwards compatibility"""
+    if update.effective_chat.type != "private":
+        gid = str(update.effective_chat.id)
+        user = update.effective_user
+        set_gsub(gid, user.id, user.first_name or "User", get_username(user), True)
+        list_text, items = build_grp_list_text(gid)
+        if not list_text:
+            sent = await update.message.reply_text(f"{hdr('Group Reminders')}\nNo active reminders.", reply_markup=gclose_kb(), parse_mode="HTML")
+            show_cb = f"gshow_list_{gid}_{sent.message_id}"
+            ctx.bot_data[f"gmin_{sent.message_id}"] = {"min_text": "<b>Group Reminders</b> — No active", "show_cb": show_cb}
+            ctx.job_queue.run_once(auto_minimize, AUTO_MIN_SEC, data={
+                "c": sent.chat.id, "m": sent.message_id,
+                "min_text": "<b>Group Reminders</b> — No active", "show_cb": show_cb
+            })
+            return
+        sent = await update.message.reply_text(list_text, reply_markup=gclose_kb(), parse_mode="HTML")
+        show_cb = f"gshow_list_{gid}_{sent.message_id}"
+        ctx.bot_data[f"gmin_{sent.message_id}"] = {"min_text": "<b>Group Reminders</b>", "show_cb": show_cb, "gid": gid}
+        ctx.job_queue.run_once(auto_minimize, AUTO_MIN_SEC, data={
+            "c": sent.chat.id, "m": sent.message_id,
+            "min_text": "<b>Group Reminders</b>", "show_cb": show_cb
+        })
+        return
+    await rm_home(ctx, ctx.user_data)
+    ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
+    await show_all_view(update.message, update.effective_user.id, ctx, new=True)
+
+async def month_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Alias to schedule MONTH view for backwards compatibility"""
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("Use /month in private chat.")
+        return
+    await rm_home(ctx, ctx.user_data)
+    ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
+    await show_month_view(update.message, update.effective_user.id, ctx, new=True)
+
+async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("Use /info in private chat.")
+        return
+    update_username(update.effective_user.id, get_username(update.effective_user))
+    cfg = get_cfg(update.effective_user.id)
+    info_text = (
+        f"{hdr('RemindX')}\n\n"
+        "Your smart reminder assistant.\n\n"
+        "<b>Just type naturally:</b>\n"
+        "<code>Buy milk tomorrow at 5pm</code>\n"
+        "<code>Meeting Monday 10am weekly</code>\n"
+        "<code>Call mom in 30 min</code>\n"
+        "<code>Gym every monday at 6pm</code>\n\n"
+        "<i>Add daily/weekly/monthly for recurring.</i>\n\n"
+        "<b>Features</b>\n"
+        "• Smart natural language input\n"
+        "• Calendar date picker\n"
+        "• Custom day selection\n"
+        "• Snooze 15m–12h\n"
+        "• Auto-retry if missed\n"
+        "• Daily digest\n"
+        "• Weekly report\n"
+        f"• Timezone: {tz_short(cfg['timezone'])}\n\n"
+        "<b>Group Reminders</b>\n"
+        "• /remind in groups\n"
+        "• Tag @user to assign\n"
+        "• Track completion\n\n"
+        "/add · /schedule · /stats · /settings"
+    )
+    show_cb = "pshow_info"
+    sent = await update.message.reply_text(info_text, reply_markup=close_kb(show_cb), parse_mode="HTML")
+    ctx.bot_data[f"pinfo_{sent.message_id}"] = {"text": info_text, "uid": update.effective_user.id}
+    schedule_minimize(ctx, sent, "<b>ℹ️ Info</b>", show_cb)
+
+async def remind_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Use /remind in groups.\nJust type naturally for personal reminders.")
+        return
+    ud = ctx.user_data
+    ud.clear()
+    uid = update.effective_user.id
+    utz = get_tz(uid)
+    gid = str(update.effective_chat.id)
+    user = update.effective_user
+    name = user.first_name or "User"
+    uname = get_username(user)
+    ud["g_chat"], ud["g_name"] = gid, name
+    set_gsub(gid, uid, name, uname, True)
+
+    tags = extract_tags(update.message)
+    logger.info(f"[REMIND] Tags extracted: {tags}")
+    if tags:
+        ud["g_tags"] = tags
+
+    raw = update.message.text or ""
+    text = re.sub(r'^/remind(@\w+)?\s*', '', raw.strip(), flags=re.I).strip()
+    text = strip_mentions(text, update.message)
+
+    if not text:
+        ud["step"] = "g_message"
+        sent = await update.message.reply_text(
+            f"{hdr('Group Reminder')}\nType your reminder message:\n<i>↩️ Reply to this message</i>",
+            reply_markup=ForceReply(selective=True, input_field_placeholder="Type your reminder..."),
+            parse_mode="HTML")
+        save_p(ud, sent)
+        return
+
+    result = parse_nl_partial(text, tz=utz)
+    if result and result.get('message'):
+        msg = result['message']
+        ud["message"] = msg
+        if result.get('time'):
+            ud["time"] = result['time']
+        if result.get('repeat'):
+            ud["repeat"] = result['repeat']
+        await handle_nl_result(update.message, ctx, uid, ud, msg, result.get('time'), result.get('date'), utz, is_group=True)
+    else:
+        ud["message"] = text
+        ud["step"] = "g_date"
+        now = datetime.now(utz)
+        await update.message.reply_text(
+            f"{hdr('Group Reminder')}\n{text}\n\nPick a date:",
+            reply_markup=cal_kb(now.year, now.month, "gcancel", "✕ Cancel", tz=utz), parse_mode="HTML")
+
+async def settings_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    await rm_home(ctx, ctx.user_data)
+    ctx.user_data.clear()
+    update_username(update.effective_user.id, get_username(update.effective_user))
+    await show_settings(update.message, update.effective_user.id, ctx, new=True)
+
+def get_user_groups(uid):
+    uid_s = str(uid)
+    gids = []
+    for r in grp_read(grp_sheet, lambda r: str(r[1]) == uid_s and len(r) > 4 and str(r[4]).lower() == "true"):
+        if r[0] not in gids:
+            gids.append(r[0])
+    return gids
+
+async def show_settings(target, uid, ctx, new=False):
+    cfg = get_cfg(uid)
+    d_on = cfg["digest_on"]
+    d_time = fmt_time(cfg["digest_time"]) if d_on else "—"
+    tz_disp = tz_label(cfg.get("timezone", DEF_TZ))
+    grps = get_user_groups(uid)
+    txt = (
+        f"{hdr('Settings')}\n\n"
+        f"<b>Digest</b>: {'ON' if d_on else 'OFF'}" + (f" · {d_time}" if d_on else "") +
+        f"\n<b>Retries</b>: {cfg['max_retries']}×"
+        f"\n<b>Gap</b>: {cfg['retry_gap']} min"
+        f"\n<b>Timezone</b>: {tz_disp}"
+    )
+    if grps:
+        txt += f"\n<b>Groups</b>: {len(grps)} subscribed"
+    btns = [
+        [InlineKeyboardButton(f"Digest: {'ON' if d_on else 'OFF'}", callback_data="cfg_digest_toggle"),
+         InlineKeyboardButton(f"⏰ {d_time}" if d_on else "—", callback_data="cfg_digest_time" if d_on else "noop")],
+        [InlineKeyboardButton(f"Retries: {cfg['max_retries']}×", callback_data="cfg_retries"),
+         InlineKeyboardButton(f"Gap: {cfg['retry_gap']}m", callback_data="cfg_gap")],
+        [InlineKeyboardButton(f"🌍 {tz_disp}", callback_data="cfg_tz"),
+         InlineKeyboardButton(f"👥 Groups ({len(grps)})", callback_data="cfg_groups") if grps else InlineKeyboardButton(" ", callback_data="noop")],
+        [InlineKeyboardButton("— Close", callback_data="cfg_close")],
+    ]
+    show_cb = "pshow_settings"
+    if new:
+        sent = await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+        schedule_minimize(ctx, sent, "<b>⚙️ Settings</b>", show_cb)
+    else:
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+
+# ============= SAVE FUNCTIONS =============
+async def save_reminder(target, uid, ud, msg, date, time_str, edit_msg=False):
+    rep = ud.get("repeat", "none")
+    sheet.append_row([uid, msg, date, time_str, rep, "active", 0, "", ""], value_input_option="RAW")
+    try:
+        row = len(sheet.get_all_values())
+    except Exception:
+        row = 0
+    ud.clear()
+    txt = f"{hdr('Saved ✓')}\n{detail(msg, date, time_str, fmt_rep(rep))}"
+    kb = saved_kb(row, rep) if row > 0 else new_kb()
+    if edit_msg:
+        await safe_edit(target, txt, kb)
+        save_home(ud, target)
+    else:
+        sent = await target.reply_text(txt, reply_markup=kb, parse_mode="HTML")
+        save_home(ud, sent)
+
+async def finish_group_remind(target, ctx, uid, ud, rep, edit_msg=False):
+    msg, ds, ts = ud.get("message", ""), ud.get("date", ""), ud.get("time", "")
+    gid = ud.get("g_chat", "")
+    name = ud.get("g_name", "User")
+    tags = ud.get("g_tags")
+    tid = gen_tid()
+
+    sheet.append_row([uid, msg, ds, ts, rep, "active", 0, gid, tid], value_input_option="RAW")
+    subs = get_gsubs(gid)
+    logger.info(f"[FINISH_GRP] tags={tags}, gid={gid}, tid={tid}, subs_count={len(subs)}")
+
+    if tags:
+        tagged_names = []
+        for sub_uid, sub_name, sub_uname in subs:
+            sub_name_l = sub_name.lower().strip()
+            sub_uname_l = sub_uname.lower().strip() if sub_uname else ""
+            matched = any(tag == sub_uname_l and sub_uname_l for tag in tags) or any(tag == sub_name_l for tag in tags)
+            if matched:
+                add_tmember(tid, sub_uid, sub_name, "waiting")
+                tagged_names.append(sub_name)
+                logger.info(f"[FINISH_GRP] MATCHED: {sub_name} (username={sub_uname})")
+            else:
+                add_tmember(tid, sub_uid, sub_name, "skipped")
+                logger.info(f"[FINISH_GRP] SKIPPED: {sub_name} (username={sub_uname})")
+        sub_info = f"For: {', '.join(tagged_names)}" if tagged_names else "No matching subscribers"
+    else:
+        for sub_uid, sub_name, sub_uname in subs:
+            add_tmember(tid, sub_uid, sub_name)
+        sub_info = gsub_text(tid)
+
+    txt = f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, fmt_rep(rep))}\nBy {name}\n\n{sub_info}"
+    show_rep = (rep == "none")
+    kb = gjoin_kb(tid, show_rep)
+    ud.clear()
+
+    if edit_msg:
+        await safe_edit(target, txt, kb)
+        ctx.bot_data[f"gm_{tid}"] = {"c": str(target.chat.id), "m": target.message_id}
+    else:
+        sent = await target.reply_text(txt, reply_markup=kb, parse_mode="HTML")
+        ctx.bot_data[f"gm_{tid}"] = {"c": str(target.chat.id), "m": sent.message_id}
+
+# ============= NL HANDLER =================
+async def handle_nl_result(target, ctx, uid, ud, msg, ts, ds, utz, is_group=False):
+    if ts:
+        if not ds:
+            ds = datetime.now(utz).strftime("%Y-%m-%d")
+        if is_past(ds, ts, utz):
+            ud["step"] = "g_date" if is_group else "date"
+            back_cb = "gcancel" if is_group else "cancel"
+            title = "Group Reminder" if is_group else "New Reminder"
+            now = datetime.now(utz)
+            sent = await target.reply_text(
+                f"{hdr(title)}\n{msg}\n\n{past_msg(ts)}\nPick a future date:",
+                reply_markup=cal_kb(now.year, now.month, back_cb, "✕ Cancel", tz=utz), parse_mode="HTML")
+            save_p(ud, sent)
+        else:
+            ud["date"] = ds
+            if is_group:
+                await finish_group_remind(target, ctx, uid, ud, ud.get("repeat", "none"))
+            else:
+                await save_reminder(target, uid, ud, msg, ds, ts)
+    elif ds:
+        ud["date"] = ds
+        ud["step"] = "g_time" if is_group else "time"
+        title = "Group Reminder" if is_group else "New Reminder"
+        if is_group:
+            sent = await target.reply_text(
+                f"{hdr(title)}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>↩️ Reply to this message</i>\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
+                reply_markup=ForceReply(selective=True, input_field_placeholder="e.g. 9pm, 9:30 PM"),
+                parse_mode="HTML")
+        else:
+            sent = await target.reply_text(
+                f"{hdr(title)}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
+                reply_markup=cancel_kb(), parse_mode="HTML")
+        save_p(ud, sent)
+    else:
+        ud["step"] = "g_date" if is_group else "date"
+        back_cb = "gcancel" if is_group else "cancel"
+        title = "Group Reminder" if is_group else "New Reminder"
+        now = datetime.now(utz)
+        sent = await target.reply_text(
+            f"{hdr(title)}\n{msg}\n\nPick a date:",
+            reply_markup=cal_kb(now.year, now.month, back_cb, "✕ Cancel", tz=utz), parse_mode="HTML")
+        save_p(ud, sent)
+
+# ============= WEEKLY REPORT ==============
+def build_weekly_detail(uid, now, utz):
+    try:
+        rem_rows = sheet.get_all_values()
+    except Exception:
+        return None
+    uid_s = str(uid)
+    week_start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    week_end = now.strftime("%Y-%m-%d")
+    done_list, missed_list = [], []
+    for v in rem_rows[1:]:
+        if len(v) < 6 or str(v[0]) != uid_s:
+            continue
+        if len(v) > 7 and str(v[7]).strip():
+            continue
+        ds = norm_date(str(v[2]).strip())
+        st = str(v[5]).strip().lower()
+        if week_start <= ds <= week_end:
+            msg = str(v[1]).strip()
+            ts = norm_time(str(v[3]).strip())
+            if st == "done":
+                done_list.append(f"  ✅ {fmt_time(ts)} · {msg[:30]}")
+            elif st == "missed":
+                missed_list.append(f"  ✗ {fmt_time(ts)} · {msg[:30]}")
+    if not done_list and not missed_list:
+        return None
+    lines = [f"{hdr('Weekly Detail')}\n"]
+    if done_list:
+        lines.append(f"<b>Completed ({len(done_list)})</b>")
+        lines.extend(done_list)
+        lines.append("")
+    if missed_list:
+        lines.append(f"<b>Missed ({len(missed_list)})</b>")
+        lines.extend(missed_list)
+    return "\n".join(lines)
+
+# ============= BUTTON HANDLERS ===========
+async def on_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data, ud, uid = q.data, ctx.user_data, q.from_user.id
+    if data == "noop":
+        return
+
+    if update.effective_chat.type == "private":
+        update_username(uid, get_username(q.from_user))
+
+    # Stats navigation
+    if data == "stats_home":
+        await show_history_hub(q.message, uid, ctx)
+        return
+    if data == "stats_close":
+        await safe_edit(q.message, "<b>📈 Stats</b>", InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data="stats_home")]]))
+        return
+
+    # Schedule navigation
+    if data == "sched_today":
+        await show_today_view(q.message, uid, ctx)
+        return
+    if data == "sched_week":
+        await show_week_view(q.message, uid, ctx)
+        return
+    if data.startswith("sched_week_"):
+        offset = int(data.split("_")[2])
+        await show_week_view(q.message, uid, ctx, week_offset=offset)
+        return
+    if data.startswith("sched_day_"):
+        date_str = data[10:]
+        await show_day_detail(q.message, uid, ctx, date_str)
+        return
+    if data == "sched_month":
+        await show_month_view(q.message, uid, ctx)
+        return
+    if data.startswith("sched_month_"):
+        parts = data[12:].split("_")
+        yr, mo = int(parts[0]), int(parts[1])
+        await show_month_view(q.message, uid, ctx, year=yr, month=mo)
+        return
+    if data.startswith("sched_mw_"):
+        parts = data[9:].split("_")
+        yr, mo, wi = int(parts[0]), int(parts[1]), int(parts[2])
+        await show_month_week_detail(q.message, uid, ctx, yr, mo, wi)
+        return
+    if data == "sched_all":
+        await show_all_view(q.message, uid, ctx)
+        return
+    
+    # History navigation
+    if data == "hist_digest":
+        await show_digest_archive(q.message, uid, ctx)
+        return
+    if data.startswith("hist_digest_"):
+        date_str = data[12:]
+        await show_digest_detail(q.message, uid, ctx, date_str)
+        return
+    if data == "hist_weekly":
+        await show_weekly_archive(q.message, uid, ctx)
+        return
+    if data.startswith("hist_weekly_"):
+        week_start = data[12:]
+        await show_weekly_detail(q.message, uid, ctx, week_start)
+        return
+    if data == "hist_monthly":
+        await show_monthly_archive(q.message, uid, ctx)
+        return
+    if data.startswith("hist_monthly_"):
+        parts = data[13:].split("_")
+        yr, mo = parts[0], parts[1]
+        await show_monthly_detail(q.message, uid, ctx, yr, mo)
+        return
+
+    if data in ("home", "cancel"):
+        ud.clear()
+        await safe_edit(q.message, HOME_TEXT, home_kb())
+        save_home(ud, q.message)
+        return
+    if data == "gcancel":
+        ud.clear()
+        await safe_edit(q.message, f"{hdr('Group Reminder')}\n\nCancelled.")
+        return
+
+    if data == "gclose":
+        mid = str(q.message.message_id)
+        stored = ctx.bot_data.get(f"gmin_{mid}")
+        if stored:
+            await safe_edit(q.message, stored["min_text"], gmin_kb(stored["show_cb"]))
+        else:
+            await safe_edit(q.message, "<b>RemindX</b>", gmin_kb(f"gshow_generic_{mid}"))
+        return
+
+    if data.startswith("pclose_"):
+        show_cb = data[7:]
+        if show_cb == "pshow_list":
+            count = "?"
+            try:
+                uid_s = str(uid)
+                rows = sheet.get_all_records()
+                count = sum(1 for r in rows if str(r.get("user_id", "")) == uid_s and str(r.get("status", "")).strip() in ("active", "pending", "missed", "snoozed") and not str(r.get("group_id", "")).strip())
+            except Exception:
+                pass
+            await safe_edit(q.message, f"<b>📋 Reminders</b> ({count})", InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=show_cb)]]))
+        elif show_cb == "pshow_info":
+            await safe_edit(q.message, "<b>ℹ️ Info</b>", InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=show_cb)]]))
+        elif show_cb == "pshow_settings":
+            await safe_edit(q.message, "<b>⚙️ Settings</b>", InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=show_cb)]]))
+        else:
+            await safe_edit(q.message, "<b>ℹ️</b>", InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data=show_cb)]]))
+        return
+
+    if data == "cfg_close":
+        await safe_edit(q.message, "<b>⚙️ Settings</b>", InlineKeyboardMarkup([[InlineKeyboardButton("📋 Show", callback_data="pshow_settings")]]))
+        return
+
+    if data == "pshow_info":
+        await info_cmd(update, ctx)
+        return
+    if data == "pshow_list":
+        await show_all_view(q.message, uid, ctx)
+        return
+    if data == "pshow_settings":
+        await show_settings(q.message, uid, ctx)
+        return
+
+    if data.startswith("gshow_start_"):
+        mid = data[12:]
+        stored = ctx.bot_data.get(f"gmin_{mid}")
+        full = stored.get("full_text", GRP_START) if stored else GRP_START
+        await safe_edit(q.message, full, gclose_kb())
+        return
+    if data.startswith("gshow_list_"):
+        parts = data[11:]
+        sep = parts.rfind("_")
+        if sep > 0:
+            gid = parts[:sep]
+        else:
+            gid = str(q.message.chat.id)
+        list_text, items = build_grp_list_text(gid)
+        if list_text:
+            await safe_edit(q.message, list_text, gclose_kb())
+        else:
+            await safe_edit(q.message, f"{hdr('Group Reminders')}\nNo active reminders.", gclose_kb())
+        return
+    if data.startswith("gshow_generic_"):
+        await safe_edit(q.message, GRP_START, gclose_kb())
+        return
+
+    if data == "add":
+        await rm_home(ctx, ud)
+        ud.clear()
+        ud["step"] = "message"
+        sent = await q.message.reply_text(f"{hdr('New Reminder')}\nEnter message:", reply_markup=cancel_kb(), parse_mode="HTML")
+        save_p(ud, sent)
+        return
+    if data == "list_refresh":
+        ud.clear()
+        await show_all_view(q.message, uid, ctx)
+        return
+
+    if data == "wrdetail":
+        utz = get_tz(uid)
+        now = datetime.now(utz)
+        detail_text = build_weekly_detail(uid, now, utz)
+        if detail_text:
+            await safe_edit(q.message, detail_text, new_kb())
+        else:
+            await safe_edit(q.message, f"{hdr('Weekly Detail')}\nNo data available.", new_kb())
+        save_home(ud, q.message)
+        return
+
+    if data.startswith("chrep_"):
+        row = int(data[6:])
+        r, msg, ds, ts, rs = row_detail(row)
+        await safe_edit(q.message, f"{hdr('Saved ✓')}\n{detail(msg, ds, ts)}\n\nRepeat?", rep_picker_kb(f"chrepv_{row}"))
+        return
+    if data.startswith("chrepv_"):
+        parts = data.split("_")
+        row_s, rep = parts[1], parts[2]
+        row = int(row_s)
+        if rep == "custom":
+            ud["custom_days_for"] = ("chrep", row)
+            ud["custom_days_selected"] = []
+            r, msg, ds, ts, rs = row_detail(row)
+            await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nSelect days:", custom_days_kb([], f"chrep_{row}"))
+            return
+        r, msg, ds, ts, rs = row_detail(row)
+        sheet.update_cell(row, 5, rep)
+        await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep))}", new_kb())
+        save_home(ud, q.message)
+        return
+
+    if data.startswith("gchrep_"):
+        tid = data[7:]
+        row, r = find_by_tid(tid)
+        if not r:
+            return
+        msg, ds, ts, rs = get_detail(r)
+        await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nRepeat?", rep_picker_kb(f"gchrepv_{tid}"))
+        return
+    if data.startswith("gchrepv_"):
+        parts = data.split("_")
+        tid, rep = parts[1], parts[2]
+        if rep == "custom":
+            ud["custom_days_for"] = ("gchrep", tid)
+            ud["custom_days_selected"] = []
+            row, r = find_by_tid(tid)
+            if not r:
+                return
+            msg, ds, ts, _ = get_detail(r)
+            await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nSelect days:", custom_days_kb([], f"gchrep_{tid}"))
+            return
+        row, r = find_by_tid(tid)
+        if not r:
+            return
+        sheet.update_cell(row, 5, rep)
+        msg, ds, ts, _ = get_detail(r)
+        sub_info = gsub_text(tid)
+        await safe_edit(q.message, f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, fmt_rep(rep))}\n\n{sub_info}", gjoin_kb(tid))
+        ctx.bot_data[f"gm_{tid}"] = {"c": str(q.message.chat.id), "m": q.message.message_id}
+        return
+
+    if data.startswith("cday_"):
+        rest = data[5:]
+        last_us = rest.rfind("_")
+        if last_us < 0:
+            return
+        prefix, day_key = rest[:last_us], rest[last_us + 1:]
+        selected = ud.get("custom_days_selected", [])
+        if day_key == "weekdays":
+            selected = ["mon", "tue", "wed", "thu", "fri"]
+        elif day_key == "all":
+            selected = list(DAY_KEYS)
+        elif day_key == "clear":
+            selected = []
+        elif day_key in DAY_KEYS:
+            if day_key in selected:
+                selected.remove(day_key)
+            else:
+                selected.append(day_key)
+            selected = [d for d in DAY_KEYS if d in selected]
+        ud["custom_days_selected"] = selected
+        info = ud.get("custom_days_for")
+        if info:
+            kind, key = info
+            if kind == "chrep":
+                r, msg, ds, ts, rs = row_detail(int(key))
+                await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nSelect days:", custom_days_kb(selected, f"chrep_{key}"))
+            elif kind == "gchrep":
+                row, r = find_by_tid(key)
+                if r:
+                    msg, ds, ts, _ = get_detail(r)
+                    await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nSelect days:", custom_days_kb(selected, f"gchrep_{key}"))
+        return
+
+    if data.startswith("cdaysave_"):
+        selected = ud.get("custom_days_selected", [])
+        if not selected:
+            return
+        rep_value = f"custom:{','.join(selected)}"
+        info = ud.get("custom_days_for")
+        if not info:
+            return
+        kind, key = info
+        ud.pop("custom_days_for", None)
+        ud.pop("custom_days_selected", None)
+        if kind == "chrep":
+            row = int(key)
+            r, msg, ds, ts, rs = row_detail(row)
+            sheet.update_cell(row, 5, rep_value)
+            await safe_edit(q.message, f"{hdr('Updated ✓')}\n{detail(msg, ds, ts, fmt_rep(rep_value))}", new_kb())
+            save_home(ud, q.message)
+        elif kind == "gchrep":
+            row, r = find_by_tid(key)
+            if r:
+                sheet.update_cell(row, 5, rep_value)
+                msg, ds, ts, _ = get_detail(r)
+                sub_info = gsub_text(key)
+                await safe_edit(q.message, f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, fmt_rep(rep_value))}\n\n{sub_info}", gjoin_kb(key))
+                ctx.bot_data[f"gm_{key}"] = {"c": str(q.message.chat.id), "m": q.message.message_id}
+        return
+
+    if data.startswith("cdayback_"):
+        info = ud.get("custom_days_for")
+        ud.pop("custom_days_for", None)
+        ud.pop("custom_days_selected", None)
+        if info:
+            kind, key = info
+            if kind == "chrep":
+                row = int(key)
+                r, msg, ds, ts, rs = row_detail(row)
+                await safe_edit(q.message, f"{hdr('Saved ✓')}\n{detail(msg, ds, ts)}\n\nRepeat?", rep_picker_kb(f"chrepv_{row}"))
+            elif kind == "gchrep":
+                row, r = find_by_tid(key)
+                if r:
+                    msg, ds, ts, _ = get_detail(r)
+                    await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\nRepeat?", rep_picker_kb(f"gchrepv_{key}"))
+        return
+
+    if data.startswith(("gjoin_", "gskip_", "gdone_", "gsnzp_", "gsnzb_", "gsnz_")):
+        await _btn_group(q, ctx, uid, data)
+        return
+    if data.startswith(("cal_", "day_")):
+        await _btn_cal(q, ctx, ud, uid, data)
+        return
+    if data.startswith(("view_", "snzp_", "snzb_", "snz_", "done_", "crem_", "undo_")):
+        await _btn_rem(q, ctx, ud, uid, data)
+        return
+    if data.startswith(("edit_", "emsg_", "edate_", "etime_")):
+        await _btn_edit(q, ud, uid, data)
+        return
+    if data.startswith(("cfg_", "cfgr_", "cfgg_", "tzr_", "tzs_", "gunsub_")):
+        await _btn_cfg(q, ctx, ud, uid, data)
+        return
+
+async def _btn_group(q, ctx, uid, data):
+    uid_s = str(uid)
+    user = q.from_user
+    uname = get_username(user)
+
+    if data.startswith("gjoin_"):
+        tid = data[6:]
+        row, r = find_by_tid(tid)
+        if not r or str(r[5]) != "active":
+            await q.answer("Already fired.", show_alert=True)
+            return
+        if not add_tmember(tid, uid_s, user.first_name or "User"):
+            await q.answer("Already joined!", show_alert=True)
+            return
+        set_gsub(str(q.message.chat.id), uid_s, user.first_name or "User", uname, True)
+        msg, ds, ts, rs = get_detail(r)
+        rep = r[4] if len(r) > 4 else "none"
+        await safe_edit(q.message, f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, rs)}\n\n{gsub_text(tid)}", gjoin_kb(tid, rep == "none"))
+        await q.answer("Joined ✓")
+    elif data.startswith("gskip_"):
+        tid = data[6:]
+        row, r = find_by_tid(tid)
+        if not r or str(r[5]) != "active":
+            await q.answer("Already fired.", show_alert=True)
+            return
+        set_gsub(str(q.message.chat.id), uid_s, user.first_name or "User", uname, True)
+        ms = get_tmembers(tid)
+        if any(str(u) == uid_s for u, _, _ in ms):
+            set_tstatus(tid, uid_s, "skipped")
+        else:
+            add_tmember(tid, uid_s, user.first_name or "User", "skipped")
+        msg, ds, ts, rs = get_detail(r)
+        rep = r[4] if len(r) > 4 else "none"
+        await safe_edit(q.message, f"{hdr('Group Reminder')}\n{detail(msg, ds, ts, rs)}\n\n{gsub_text(tid)}", gjoin_kb(tid, rep == "none"))
+        await q.answer("Skipped")
+    elif data.startswith("gdone_"):
+        tid = data[6:]
+        ms = get_tmembers(tid)
+        st = next((s for u, _, s in ms if str(u) == uid_s), None)
+        if st and st != "pending":
+            await safe_edit(q.message, f"<i>Already handled</i>")
+            return
+        set_tstatus(tid, uid_s, "done")
+        await rm_gpm(ctx, tid, uid_s)
+        row, r = find_by_tid(tid)
+        msg = str(r[1]).strip() if r else ""
+        await safe_edit(q.message, f"{msg}\n\n<b>Done</b> ✓")
+        await update_gstatus(ctx, tid, msg)
+        if row and r:
+            await check_grp_resolved(ctx, tid, row, r)
+            await update_gstatus(ctx, tid, msg)
+    elif data.startswith("gsnzp_"):
+        tid = data[6:]
+        st = next((s for u, _, s in get_tmembers(tid) if str(u) == uid_s), None)
+        if st and st != "pending":
+            await safe_edit(q.message, f"<i>Already handled</i>")
+            return
+        row, r = find_by_tid(tid)
+        await safe_edit(q.message, f"{str(r[1]).strip() if r else ''}\n\nSnooze for:", snz_kb(tid, "gsnz"))
+    elif data.startswith("gsnzb_"):
+        tid = data[6:]
+        row, r = find_by_tid(tid)
+        await safe_edit(q.message, f"{str(r[1]).strip() if r else ''}\n\n<b>⏰ Group Reminder</b>", gact_kb(tid))
+    elif data.startswith("gsnz_"):
+        rest = data[5:]
+        last_us = rest.rfind("_")
+        if last_us < 0:
+            return
+        tid, mins = rest[:last_us], int(rest[last_us + 1:])
+        st = next((s for u, _, s in get_tmembers(tid) if str(u) == uid_s), None)
+        if st and st != "pending":
+            await safe_edit(q.message, f"<i>Already handled</i>")
+            return
+        set_tstatus(tid, uid_s, "snoozed")
+        await rm_gpm(ctx, tid, uid_s)
+        row, r = find_by_tid(tid)
+        msg = str(r[1]).strip() if r else ""
+        nt = datetime.now(get_tz(uid)) + timedelta(minutes=mins)
+        await safe_edit(q.message, f"{msg}\n\n<b>Snoozed {fmt_snz(mins)}</b> → {fmt_time(nt.strftime('%H:%M'))}")
+        await update_gstatus(ctx, tid, msg)
+        ctx.job_queue.run_once(grp_snooze_cb, mins * 60, data={"tid": tid, "uid": uid, "uid_s": uid_s}, name=f"gsnz-{tid}-{uid_s}")
+
+async def _btn_cal(q, ctx, ud, uid, data):
+    utz = get_tz(uid)
+    step = ud.get("step", "")
+
+    if data.startswith("cal_"):
+        parts = data[4:].split("_")
+        yr, mo = int(parts[0]), int(parts[1])
+        if step == "edit_date":
+            row = ud["editing_row"]
+            r, msg, ds, ts, rs = row_detail(row)
+            await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nPick new date:",
+                            cal_kb(yr, mo, f"edit_{row}", "« Back", tz=utz))
+        elif step == "g_date":
+            msg = ud.get("message", "")
+            ts = ud.get("time")
+            await safe_edit(q.message, f"{hdr('Group Reminder')}\n{msg}{chr(10) + fmt_time(ts) if ts else ''}\n\nPick a date:",
+                            cal_kb(yr, mo, "gcancel", "✕ Cancel", tz=utz))
+        else:
+            msg, ts = ud.get("message", ""), ud.get("time")
+            await safe_edit(q.message, f"{hdr('New Reminder')}\n{msg}{chr(10) + fmt_time(ts) if ts else ''}\n\nPick a date:", cal_kb(yr, mo, tz=utz))
+
+    elif data.startswith("day_"):
+        ds = data[4:]
+        if step == "edit_date":
+            row = ud["editing_row"]
+            r, msg, old_d, ts, rs = row_detail(row)
+            if is_past(ds, ts, utz):
+                now = datetime.now(utz)
+                await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\n\n{past_msg(ts)}\nPick a future date or change time first.",
+                                cal_kb(now.year, now.month, f"edit_{row}", "« Back", tz=utz))
+            else:
+                sheet.update_cell(row, 3, ds)
+                ud.clear()
+                await safe_edit(q.message, f"{hdr('Updated ✓')}\n{msg}\nDate: {fmt_date(old_d)} → <b>{fmt_date(ds)}</b>\nTime: {fmt_time(ts)} · {rs}", new_kb())
+                save_home(ud, q.message)
+
+        elif step == "g_date":
+            ud["date"] = ds
+            msg, ts = ud.get("message", ""), ud.get("time")
+            if ts:
+                if is_past(ds, ts, utz):
+                    now = datetime.now(utz)
+                    await safe_edit(q.message, f"{hdr('Group Reminder')}\n{msg}\n{fmt_time(ts)}\n\n{past_msg(ts)}\nPick a future date:",
+                                    cal_kb(now.year, now.month, "gcancel", "✕ Cancel", tz=utz))
+                else:
+                    rep = ud.get("repeat", "none")
+                    await finish_group_remind(q.message, ctx, uid, ud, rep, edit_msg=True)
+            else:
+                ud["step"] = "g_time"
+                try:
+                    await q.message.delete()
+                except Exception:
+                    pass
+                sent = await ctx.bot.send_message(
+                    chat_id=q.message.chat.id,
+                    text=f"{hdr('Group Reminder')}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>↩️ Reply to this message</i>\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
+                    reply_markup=ForceReply(selective=True, input_field_placeholder="e.g. 9pm, 9:30 PM"),
+                    parse_mode="HTML")
+                save_p(ud, sent)
+
+        else:
+            ud["date"] = ds
+            msg, ts = ud.get("message", ""), ud.get("time")
+            if ts:
+                if is_past(ds, ts, utz):
+                    now = datetime.now(utz)
+                    await safe_edit(q.message, f"{hdr('New Reminder')}\n{msg}\n{fmt_time(ts)}\n\n{past_msg(ts)}\nPick a future date:", cal_kb(now.year, now.month, tz=utz))
+                else:
+                    await save_reminder(q.message, uid, ud, msg, ds, ts, edit_msg=True)
+            else:
+                ud["step"] = "time"
+                await safe_edit(q.message, f"{hdr('New Reminder')}\n{msg}\n{fmt_date(ds)}\n\nEnter time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", cancel_kb())
+                save_p(ud, q.message)
+
+async def _btn_rem(q, ctx, ud, uid, data):
+    if data.startswith("view_"):
+        row = int(data[5:])
+        r, msg, ds, ts, rs = row_detail(row)
+        st = r[5] if len(r) > 5 else "active"
+        btns = []
+        if st not in ("missed", "cancelled"):
+            btns.append([InlineKeyboardButton("✎ Edit", callback_data=f"edit_{row}"), InlineKeyboardButton("✕ Cancel", callback_data=f"crem_{row}")])
+        else:
+            btns.append([InlineKeyboardButton("✕ Remove", callback_data=f"crem_{row}")])
+        btns.append([InlineKeyboardButton("« Back", callback_data="sched_all")])
+        await safe_edit(q.message, f"{hdr('Reminder')}\n{msg}\n\n{fmt_date(ds)} · {fmt_time(ts)}\n{rs} · {ST_IC.get(st, '?')} <i>{ST_LB.get(st, st)}</i>", InlineKeyboardMarkup(btns))
+    elif data.startswith("snzp_"):
+        row = int(data[5:])
+        r, msg, ds, ts, rs = row_detail(row)
+        if len(r) > 5 and r[5] != "pending":
+            await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<i>Already handled</i>")
+            return
+        await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\nSnooze for:", snz_kb(row))
+    elif data.startswith("snzb_"):
+        row = int(data[5:])
+        r, msg, ds, ts, rs = row_detail(row)
+        if len(r) > 5 and r[5] != "pending":
+            await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<i>Already handled</i>")
+            return
+        await safe_edit(q.message, f"{msg}\n\n<b>⏰ Reminder</b>", act_kb(row))
+    elif data.startswith("snz_"):
+        parts = data[4:].split("_")
+        row, mins = int(parts[0]), int(parts[1])
+        r, msg, ds, ts, rs = row_detail(row)
+        if len(r) > 5 and r[5] != "pending":
+            await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<i>Already handled</i>")
+            return
+        kill_jobs(ctx.job_queue, row)
+        await rm_btns(ctx, row)
+        utz = get_tz(uid)
+        nt = datetime.now(utz) + timedelta(minutes=mins)
+        rep = r[4] if len(r) > 4 else "none"
+        if rep and rep != "none":
+            sheet.update_cell(row, 6, "snoozed")
+            sheet.update_cell(row, 7, 0)
+            ctx.job_queue.run_once(snooze_cb, mins * 60, data={"row": row, "chat": uid}, name=f"snooze-{row}")
+        else:
+            sheet.update_cell(row, 3, nt.strftime("%Y-%m-%d"))
+            sheet.update_cell(row, 4, nt.strftime("%H:%M"))
+            sheet.update_cell(row, 6, "active")
+            sheet.update_cell(row, 7, 0)
+            ctx.bot_data.pop(f"r_{row}", None)
+        await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<b>Snoozed {fmt_snz(mins)}</b> → {fmt_time(nt.strftime('%H:%M'))}")
+    elif data.startswith("done_"):
+        row = int(data[5:])
+        r, msg, ds, ts, rs = row_detail(row)
+        if len(r) > 5 and r[5] != "pending":
+            await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<i>Already handled</i>")
+            return
+        kill_jobs(ctx.job_queue, row)
+        await rm_btns(ctx, row)
+        if not advance_rep(row, r):
+            sheet.update_cell(row, 6, "done")
+            sheet.update_cell(row, 7, 0)
+        ctx.bot_data.pop(f"r_{row}", None)
+        await safe_edit(q.message, f"{detail(msg, ds, ts, rs)}\n\n<b>Done</b> ✓")
+    elif data.startswith("crem_"):
+        row = int(data[5:])
+        kill_jobs(ctx.job_queue, row)
+        r, msg, ds, ts, rs = row_detail(row)
+        sheet.update_cell(row, 6, "cancelled")
+        sheet.update_cell(row, 7, 0)
+        await rm_btns(ctx, row)
+        ctx.bot_data.pop(f"r_{row}", None)
+        await safe_edit(q.message, f"{detail(msg, ds, ts)}\n\n<b>Cancelled</b> ✕",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("↩ Undo", callback_data=f"undo_{row}"), InlineKeyboardButton("＋ New", callback_data="add")]]))
+        save_home(ud, q.message)
+    elif data.startswith("undo_"):
+        row = int(data[5:])
+        r, msg, ds, ts, rs = row_detail(row)
+        sheet.update_cell(row, 6, "active")
+        await safe_edit(q.message, f"{hdr('Restored ✓')}\n{detail(msg, ds, ts, rs)}", new_kb())
+        save_home(ud, q.message)
+
+async def _btn_edit(q, ud, uid, data):
+    if data.startswith("emsg_"):
+        row = int(data[5:])
+        ud["editing_row"], ud["step"] = row, "edit_message"
+        r, msg, ds, ts, rs = row_detail(row)
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\nCurrent: <i>{msg}</i>\n{fmt_date(ds)} · {fmt_time(ts)} · {rs}\n\nEnter new message:",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"edit_{row}")]]))
+        save_p(ud, q.message)
+    elif data.startswith("edate_"):
+        row = int(data[6:])
+        ud["editing_row"], ud["step"] = row, "edit_date"
+        r, msg, ds, ts, rs = row_detail(row)
+        utz = get_tz(uid)
+        now = datetime.now(utz)
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nPick new date:",
+                        cal_kb(now.year, now.month, f"edit_{row}", "« Back", tz=utz))
+    elif data.startswith("etime_"):
+        row = int(data[6:])
+        ud["editing_row"], ud["step"] = row, "edit_time"
+        r, msg, ds, ts, rs = row_detail(row)
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{msg}\nCurrent: <i>{fmt_date(ds)} · {fmt_time(ts)}</i>\n\nEnter new time:\n<i>e.g. 9pm, 9:30 PM, 21:30</i>",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"edit_{row}")]]))
+        save_p(ud, q.message)
+    elif data.startswith("edit_"):
+        row = int(data[5:])
+        ud.clear()
+        r, msg, ds, ts, rs = row_detail(row)
+        await safe_edit(q.message, f"{hdr('Edit Reminder')}\n{detail(msg, ds, ts, rs)}\n\nWhat to change?",
+                        InlineKeyboardMarkup([
+                            [InlineKeyboardButton("Message", callback_data=f"emsg_{row}"), InlineKeyboardButton("Date", callback_data=f"edate_{row}"),
+                             InlineKeyboardButton("Time", callback_data=f"etime_{row}")],
+                            [InlineKeyboardButton("« Back", callback_data=f"view_{row}")],
+                        ]))
+
+async def _btn_cfg(q, ctx, ud, uid, data):
+    if data == "cfg_digest_toggle":
+        cfg = get_cfg(uid)
+        save_cfg(uid, "digest_on", str(not cfg["digest_on"]).lower())
+        new_val = "ON" if not cfg["digest_on"] else "OFF"
+        await safe_edit(q.message, f"{hdr('Settings')}\n\nDigest → <b>{new_val}</b>", new_kb())
+        save_home(ud, q.message)
+    elif data == "cfg_digest_time":
+        ud.clear()
+        ud["step"] = "set_digest_time"
+        cfg = get_cfg(uid)
+        await safe_edit(q.message, f"{hdr('Settings')}\nDigest time: <b>{fmt_time(cfg['digest_time'])}</b>\n\nEnter new time:\n<i>e.g. 7am, 8:30 AM</i>",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("— Close", callback_data="cfg_close")]]))
+        save_p(ud, q.message)
+    elif data == "cfg_retries":
+        cfg = get_cfg(uid)
+        await safe_edit(q.message, f"{hdr('Settings')}\nRetries: <b>{cfg['max_retries']}×</b>\n\nHow many retries?",
+                        cfg_picker_kb([1, 2, 3, 5, 7, 10], str, cfg["max_retries"], "cfgr"))
+    elif data.startswith("cfgr_"):
+        val = int(data[5:])
+        save_cfg(uid, "max_retries", val)
+        await safe_edit(q.message, f"{hdr('Settings')}\n\nRetries → <b>{val}×</b>", new_kb())
+        save_home(ud, q.message)
+    elif data == "cfg_gap":
+        cfg = get_cfg(uid)
+        await safe_edit(q.message, f"{hdr('Settings')}\nGap: <b>{cfg['retry_gap']} min</b>\n\nTime between retries?",
+                        cfg_picker_kb([5, 10, 15, 20, 30, 60], lambda v: f"{v}m", cfg["retry_gap"], "cfgg"))
+    elif data.startswith("cfgg_"):
+        val = int(data[5:])
+        save_cfg(uid, "retry_gap", val)
+        await safe_edit(q.message, f"{hdr('Settings')}\n\nRetry gap → <b>{val} min</b>", new_kb())
+        save_home(ud, q.message)
+    elif data == "cfg_tz":
+        cfg = get_cfg(uid)
+        btns, row = [], []
+        for region in TZ_REGIONS:
+            row.append(InlineKeyboardButton(f"{TZ_ICONS.get(region, '🌐')} {region}", callback_data=f"tzr_{region}"))
+            if len(row) == 2:
+                btns.append(row)
+                row = []
+        if row:
+            btns.append(row)
+        btns.append([InlineKeyboardButton("— Close", callback_data="cfg_close")])
+        await safe_edit(q.message, f"{hdr('Timezone')}\n\nCurrent: <b>{tz_short(cfg.get('timezone', DEF_TZ))}</b>\n\nPick a region:", InlineKeyboardMarkup(btns))
+    elif data.startswith("tzr_"):
+        cfg = get_cfg(uid)
+        region = data[4:]
+        btns, row = [], []
+        for idx, (tz, country, offset, reg) in enumerate(TZ_DATA):
+            if reg != region:
+                continue
+            lbl = f"[{country}]" if tz == cfg.get("timezone", DEF_TZ) else country
+            row.append(InlineKeyboardButton(f"{lbl} {offset}", callback_data=f"tzs_{idx}"))
+            if len(row) == 2:
+                btns.append(row)
+                row = []
+        if row:
+            btns.append(row)
+        btns.append([InlineKeyboardButton("« Regions", callback_data="cfg_tz")])
+        await safe_edit(q.message, f"{hdr('Timezone')}\n\n{TZ_ICONS.get(region, '🌐')} <b>{region}</b>\n\nPick:", InlineKeyboardMarkup(btns))
+    elif data.startswith("tzs_"):
+        idx = int(data[4:])
+        if 0 <= idx < len(TZ_DATA):
+            tz_name, country, _, _ = TZ_DATA[idx]
+            save_cfg(uid, "timezone", tz_name)
+            await safe_edit(q.message, f"{hdr('Settings')}\n\nTimezone → <b>{country}</b>", new_kb())
+            save_home(ud, q.message)
+    elif data == "cfg_groups":
+        grps = get_user_groups(uid)
+        if not grps:
+            await safe_edit(q.message, f"{hdr('Groups')}\n\nNo group subscriptions.",
+                            InlineKeyboardMarkup([[InlineKeyboardButton("— Close", callback_data="cfg_close")]]))
+            return
+        btns = []
+        for gid in grps:
+            try:
+                chat = await ctx.bot.get_chat(int(gid))
+                name = chat.title or f"Group {gid}"
+            except Exception:
+                name = f"Group {gid}"
+            btns.append([InlineKeyboardButton(f"✕ {name}", callback_data=f"gunsub_{gid}")])
+        btns.append([InlineKeyboardButton("— Close", callback_data="cfg_close")])
+        await safe_edit(q.message, f"{hdr('Group Subscriptions')}\n\nTap to unsubscribe:", InlineKeyboardMarkup(btns))
+    elif data.startswith("gunsub_"):
+        gid_s, uid_s = data[7:], str(uid)
+        try:
+            rows = grp_sheet.get_all_values()
+            for i, r in enumerate(rows[1:], 2):
+                if str(r[0]) == gid_s and str(r[1]) == uid_s:
+                    grp_sheet.update_cell(i, 5, "false")
+                    break
+        except Exception:
+            pass
+        try:
+            chat = await ctx.bot.get_chat(int(gid_s))
+            name = chat.title or f"Group {gid_s}"
+        except Exception:
+            name = f"Group {gid_s}"
+        await safe_edit(q.message, f"{hdr('Settings')}\n\nUnsubscribed from <b>{name}</b> ✓", new_kb())
+        save_home(ud, q.message)
+
+# ============= TEXT HANDLER ===============
+async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    step = ctx.user_data.get("step", "")
+    text = update.message.text.strip()
+
+    if update.effective_chat.type == "private":
+        update_username(update.effective_user.id, get_username(update.effective_user))
+
+    if update.effective_chat.type != "private":
+        if step.startswith("g_") and str(update.effective_chat.id) == str(ctx.user_data.get("g_chat", "")):
+            await _do_step(update, ctx, step, text)
+        return
+
+    if step:
+        await _do_step(update, ctx, step, text)
+    else:
+        await _try_nl(update, ctx, text)
+
+async def _try_nl(update, ctx, text):
+    uid, utz = update.effective_user.id, get_tz(update.effective_user.id)
+    result = parse_nl_partial(text, tz=utz)
+    if not result or not result['message']:
+        return
+
+    msg, ts, ds, rep = result['message'], result.get('time'), result.get('date'), result.get('repeat')
+
+    has_prefix = bool(re.search(r'(?:remind|reminder|remember|don.?t\s+forget|set\s+reminder)', text, re.I))
+    if not ts and not ds and not has_prefix:
+        return
+
+    ud = ctx.user_data
+    await rm_home(ctx, ud)
+    ud.clear()
+    ud["message"] = msg
+    if ts:
+        ud["time"] = ts
+    if rep:
+        ud["repeat"] = rep
+
+    await handle_nl_result(update.message, ctx, uid, ud, msg, ts, ds, utz)
+
+async def _do_step(update, ctx, step, text):
+    ud, uid = ctx.user_data, update.effective_user.id
+    utz = get_tz(uid)
+
+    if step == "message":
+        await del_prompt(ctx, ud)
+        result = parse_nl_partial(text, tz=utz)
+        if result and (result.get('time') or result.get('date')):
+            msg = result['message']
+            ud["message"] = msg
+            if result.get('time'):
+                ud["time"] = result['time']
+            if result.get('repeat'):
+                ud["repeat"] = result['repeat']
+            await handle_nl_result(update.message, ctx, uid, ud, msg, result.get('time'), result.get('date'), utz)
+        else:
+            msg = result['message'] if result else text
+            ud["message"] = msg
+            ud["step"] = "date"
+            now = datetime.now(utz)
+            sent = await update.message.reply_text(
+                f"{hdr('New Reminder')}\n{msg}\n\nPick a date:",
+                reply_markup=cal_kb(now.year, now.month, tz=utz), parse_mode="HTML")
+            save_p(ud, sent)
+
+    elif step == "time":
+        parsed = parse_time(text)
+        if not parsed:
+            await update.message.reply_text("Invalid time.\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", parse_mode="HTML")
+            return
+        ds = ud.get("date", "")
+        if is_past(ds, parsed, utz):
+            await update.message.reply_text(f"{past_msg(parsed)}\nEnter a future time:", parse_mode="HTML")
+            return
+        await del_prompt(ctx, ud)
+        ud["time"] = parsed
+        await save_reminder(update.message, uid, ud, ud.get("message", ""), ds, parsed)
+
+    elif step == "edit_message":
+        row = ud.get("editing_row")
+        if not row:
+            return
+        await rm_prompt(ctx, ud)
+        r, old, ds, ts, rs = row_detail(row)
+        sheet.update_cell(row, 2, text)
+        ud.clear()
+        sent = await update.message.reply_text(
+            f"{hdr('Updated ✓')}\nMessage: {old} → <b>{text}</b>\n{fmt_date(ds)} · {fmt_time(ts)} · {rs}",
+            reply_markup=new_kb(), parse_mode="HTML")
+        save_home(ud, sent)
+    elif step == "edit_time":
+        row = ud.get("editing_row")
+        if not row:
+            return
+        parsed = parse_time(text)
+        if not parsed:
+            await update.message.reply_text("Invalid time.\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", parse_mode="HTML")
+            return
+        r, msg, ds, old_t, rs = row_detail(row)
+        if is_past(ds, parsed, utz):
+            await update.message.reply_text(f"{past_msg(parsed)}\nEnter a future time:", parse_mode="HTML")
+            return
+        await del_prompt(ctx, ud)
+        sheet.update_cell(row, 4, parsed)
+        ud.clear()
+        sent = await update.message.reply_text(
+            f"{hdr('Updated ✓')}\n{msg}\nTime: {fmt_time(old_t)} → <b>{fmt_time(parsed)}</b> · {fmt_date(ds)} · {rs}",
+            reply_markup=new_kb(), parse_mode="HTML")
+        save_home(ud, sent)
+    elif step == "set_digest_time":
+        parsed = parse_time(text)
+        if not parsed:
+            await update.message.reply_text("Invalid time.\n<i>e.g. 7am, 8:30 AM</i>", parse_mode="HTML")
+            return
+        await del_prompt(ctx, ud)
+        save_cfg(uid, "digest_time", parsed)
+        ud.clear()
+        sent = await update.message.reply_text(
+            f"{hdr('Settings')}\n\nDigest time → <b>{fmt_time(parsed)}</b>",
+            reply_markup=new_kb(), parse_mode="HTML")
+        save_home(ud, sent)
+
+    elif step == "g_message":
+        await del_prompt(ctx, ud)
+        result = parse_nl_partial(text, tz=utz)
+        if result and (result.get('time') or result.get('date')):
+            msg = result['message']
+            ud["message"] = msg
+            if result.get('time'):
+                ud["time"] = result['time']
+            if result.get('repeat'):
+                ud["repeat"] = result['repeat']
+            await handle_nl_result(update.message, ctx, uid, ud, msg, result.get('time'), result.get('date'), utz, is_group=True)
+        else:
+            msg = result['message'] if result else text
+            ud["message"] = msg
+            ud["step"] = "g_date"
+            now = datetime.now(utz)
+            sent = await update.message.reply_text(
+                f"{hdr('Group Reminder')}\n{msg}\n\nPick a date:",
+                reply_markup=cal_kb(now.year, now.month, "gcancel", "✕ Cancel", tz=utz), parse_mode="HTML")
+            save_p(ud, sent)
+
+    elif step == "g_time":
+        parsed = parse_time(text)
+        if not parsed:
+            await update.message.reply_text("Invalid time.\n<i>e.g. 9pm, 9:30 PM, 21:30</i>", parse_mode="HTML")
+            return
+        ds = ud.get("date", "")
+        if is_past(ds, parsed, utz):
+            await update.message.reply_text(f"{past_msg(parsed)}\nEnter a future time:", parse_mode="HTML")
+            return
+        await del_prompt(ctx, ud)
+        ud["time"] = parsed
+        rep = ud.get("repeat", "none")
+        await finish_group_remind(update.message, ctx, uid, ud, rep)
+
+# ============= FIRE & RETRY ==============
+async def send_and_track(ctx, chat_id, text, kb, track_key, track_cid):
+    try:
+        sent = await ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML")
+        ctx.bot_data[track_key] = {"c": track_cid, "m": sent.message_id}
+        return True
+    except Exception as e:
+        logger.error(f"Send {chat_id}: {e}")
+        return False
+
+async def snooze_cb(ctx: ContextTypes.DEFAULT_TYPE):
+    row, chat = ctx.job.data["row"], ctx.job.data["chat"]
+    try:
+        r = sheet.row_values(row)
+    except Exception as e:
+        logger.error(f"snooze row {row}: {e}")
+        return
+    if not r or len(r) <= 5 or r[5] != "snoozed":
+        return
+    await rm_btns(ctx, row)
+    if await send_and_track(ctx, chat, f"{str(r[1]).strip()}\n\n<b>⏰ Reminder</b>", act_kb(row), f"r_{row}", chat):
+        sheet.update_cell(row, 6, "pending")
+        sheet.update_cell(row, 7, 0)
+        cfg = get_cfg(int(r[0]) if r[0].isdigit() else r[0])
+        ctx.job_queue.run_once(auto_retry, cfg["retry_gap"] * 60, data={"row": row, "chat": chat}, name=f"retry-{row}")
+
+async def auto_retry(ctx: ContextTypes.DEFAULT_TYPE):
+    row, chat = ctx.job.data["row"], ctx.job.data["chat"]
+    try:
+        r = sheet.row_values(row)
+    except Exception as e:
+        logger.error(f"retry {row}: {e}")
+        return
+    if not r or len(r) <= 5 or r[5] != "pending":
+        return
+    uid_val = int(r[0]) if r[0].isdigit() else r[0]
+    cfg = get_cfg(uid_val)
+    max_r, gap = cfg["max_retries"], cfg["retry_gap"]
+    count = int(r[6]) if len(r) > 6 and r[6].isdigit() else 0
+    if count >= max_r:
+        if not advance_rep(row, r):
+            sheet.update_cell(row, 6, "missed")
+            sheet.update_cell(row, 7, 0)
+        return
+    await rm_btns(ctx, row)
+    nc = count + 1
+    await send_and_track(ctx, chat, f"{str(r[1]).strip()}\n\n<b>Reminder</b> ({nc}/{max_r})", act_kb(row), f"r_{row}", chat)
+    sheet.update_cell(row, 7, nc)
+    if nc >= max_r:
+        if not advance_rep(row, r):
+            sheet.update_cell(row, 6, "missed")
+            sheet.update_cell(row, 7, 0)
+    else:
+        ctx.job_queue.run_once(auto_retry, gap * 60, data={"row": row, "chat": chat}, name=f"retry-{row}")
+
+async def grp_snooze_cb(ctx: ContextTypes.DEFAULT_TYPE):
+    tid, uid, uid_s = ctx.job.data["tid"], ctx.job.data["uid"], ctx.job.data["uid_s"]
+    st = next((s for u, _, s in get_tmembers(tid) if str(u) == uid_s), None)
+    if st != "snoozed":
+        return
+    set_tstatus(tid, uid_s, "pending")
+    row, r = find_by_tid(tid)
+    if not r:
+        return
+    msg = str(r[1]).strip()
+    await rm_gpm(ctx, tid, uid_s)
+    if not await send_and_track(ctx, uid, f"{msg}\n\n<b>⏰ Group Reminder</b>", gact_kb(tid), f"gpm_{tid}_{uid_s}", uid):
+        set_tstatus(tid, uid_s, "missed")
+    await update_gstatus(ctx, tid, msg)
+
+async def fire_group(ctx, row, v, uid, msg, gid, tid, cfg):
+    active = [(u, n) for u, n, s in get_tmembers(tid) if s == "waiting"]
+    if not active:
+        sheet.update_cell(row, 6, "done")
+        return
+    for u, n in active:
+        set_tstatus(tid, u, "pending")
+    setup = ctx.bot_data.pop(f"gm_{tid}", None)
+    if setup:
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id=int(setup["c"]), message_id=setup["m"], reply_markup=None)
+        except Exception:
+            pass
+    try:
+        status = await ctx.bot.send_message(chat_id=int(gid), text=gstatus_text(tid, msg), parse_mode="HTML")
+        ctx.bot_data[f"gs_{tid}"] = {"c": int(gid), "m": status.message_id}
+    except Exception as e:
+        logger.error(f"[FIRE] Group {gid}: {e}")
+    for u, n in active:
+        if not await send_and_track(ctx, int(u), f"{msg}\n\n<b>⏰ Group Reminder</b>", gact_kb(tid), f"gpm_{tid}_{u}", int(u)):
+            set_tstatus(tid, u, "missed")
+    sheet.update_cell(row, 6, "pending")
+    sheet.update_cell(row, 7, 0)
+    ctx.job_queue.run_once(grp_retry, cfg.get("retry_gap", DEF_RETRY_GAP) * 60,
+                           data={"tid": tid, "row": row, "gid": gid}, name=f"gretry-{tid}")
+
+async def grp_retry(ctx: ContextTypes.DEFAULT_TYPE):
+    tid, row, gid = ctx.job.data["tid"], ctx.job.data["row"], ctx.job.data["gid"]
+    try:
+        r = sheet.row_values(row)
+    except Exception as e:
+        logger.error(f"[GRETRY] {row}: {e}")
+        return
+    if not r or len(r) <= 5 or r[5] != "pending":
+        return
+    creator = int(r[0]) if r[0].isdigit() else r[0]
+    cfg = get_cfg(creator)
+    max_r, gap = cfg["max_retries"], cfg["retry_gap"]
+    count = int(r[6]) if len(r) > 6 and r[6].isdigit() else 0
+    pending = [(u, n) for u, n, s in get_tmembers(tid) if s == "pending"]
+    msg = str(r[1]).strip()
+    if not pending or count >= max_r:
+        for u, n in pending:
+            set_tstatus(tid, u, "missed")
+        await update_gstatus(ctx, tid, msg)
+        await check_grp_resolved(ctx, tid, row, r)
+        return
+    nc = count + 1
+    for u, n in pending:
+        await rm_gpm(ctx, tid, u)
+        if not await send_and_track(ctx, int(u), f"{msg}\n\n<b>Group Reminder</b> ({nc}/{max_r})", gact_kb(tid), f"gpm_{tid}_{u}", int(u)):
+            set_tstatus(tid, u, "missed")
+    sheet.update_cell(row, 7, nc)
+    await update_gstatus(ctx, tid, msg)
+    if nc >= max_r:
+        for u, n in pending:
+            set_tstatus(tid, u, "missed")
+        await update_gstatus(ctx, tid, msg)
+        await check_grp_resolved(ctx, tid, row, r)
+    else:
+        ctx.job_queue.run_once(grp_retry, gap * 60, data={"tid": tid, "row": row, "gid": gid}, name=f"gretry-{tid}")
+
+# ============= DAILY DIGEST ==============
+async def check_digest(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        cfg_rows = cfg_sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            cfg_rows = cfg_sheet.get_all_values()
+        except Exception:
+            return
+    for r in cfg_rows[1:]:
+        if len(r) < 3 or str(r[1]).lower() != "true":
+            continue
+        tz_name = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        user_tz = safe_tz(tz_name)
+        now = datetime.now(user_tz)
+        if norm_time(r[2]) != now.strftime("%H:%M"):
+            continue
+        try:
+            uid_int = int(r[0])
+        except (ValueError, TypeError):
+            continue
+        try:
+            rem_rows = sheet.get_all_values()
+        except Exception:
+            continue
+        today = now.strftime("%Y-%m-%d")
+        items = [v for v in rem_rows[1:] if len(v) >= 6 and str(v[0]) == str(r[0])
+                 and str(v[5]).strip().lower() in ("active", "snoozed") and norm_date(str(v[2]).strip()) == today
+                 and not (len(v) > 7 and str(v[7]).strip())]
+        items.sort(key=lambda x: norm_time(str(x[3]).strip()))
+        today_str = now.strftime("%-d %b")
+        if items:
+            lines = [f"☀️ <b>Good morning!</b>\n{DIV}\n\nToday — {today_str}\n"]
+            for v in items:
+                msg = str(v[1]).strip()
+                lines.append(f"  {fmt_time(norm_time(str(v[3]).strip()))} · {msg[:30] + '…' if len(msg) > 30 else msg}")
+            lines.append(f"\n{len(items)} reminder{'s' if len(items) != 1 else ''} today")
+        else:
+            lines = [f"☀️ <b>Good morning!</b>\n{DIV}\n\nToday — {today_str}\n", "No reminders today. Enjoy your day!"]
+        
+        digest_text = "\n".join(lines)
+        try:
+            await ctx.bot.send_message(chat_id=uid_int, text=digest_text, reply_markup=new_kb(), parse_mode="HTML")
+            # Save to archive
+            save_digest_archive(uid_int, today, len(items), digest_text)
+        except Exception as e:
+            logger.error(f"[DIGEST] {r[0]}: {e}")
+
+# ============= WEEKLY REPORT =============
+async def check_weekly_report(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        cfg_rows = cfg_sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            cfg_rows = cfg_sheet.get_all_values()
+        except Exception:
+            return
+    for r in cfg_rows[1:]:
+        tz_name = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        user_tz = safe_tz(tz_name)
+        now = datetime.now(user_tz)
+        if now.weekday() != 6:
+            continue
+        if now.strftime("%H:%M") != "09:00":
+            continue
+        try:
+            uid_int = int(r[0])
+        except (ValueError, TypeError):
+            continue
+        try:
+            rem_rows = sheet.get_all_values()
+        except Exception:
+            continue
+        week_start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        week_end = now.strftime("%Y-%m-%d")
+        uid_s = str(r[0])
+        done, missed = 0, 0
+        day_done, day_missed = {}, {}
+        for v in rem_rows[1:]:
+            if len(v) < 6 or str(v[0]) != uid_s:
+                continue
+            if len(v) > 7 and str(v[7]).strip():
+                continue
+            ds = norm_date(str(v[2]).strip())
+            st = str(v[5]).strip().lower()
+            if week_start <= ds <= week_end:
+                if st == "done":
+                    done += 1
+                elif st == "missed":
+                    missed += 1
+                try:
+                    wd = datetime.strptime(ds, "%Y-%m-%d").strftime("%A")
+                    if st == "done":
+                        day_done[wd] = day_done.get(wd, 0) + 1
+                    elif st == "missed":
+                        day_missed[wd] = day_missed.get(wd, 0) + 1
+                except Exception:
+                    pass
+        total = done + missed
+        if total == 0:
+            continue
+        pct = round(done / total * 100)
+        best_day = max(day_done, key=day_done.get) if day_done else "—"
+        worst_day = max(day_missed, key=day_missed.get) if day_missed else "—"
+        if pct >= 90:
+            mot = "Outstanding! 🏆"
+        elif pct >= 70:
+            mot = "Keep it up! 💪"
+        elif pct >= 50:
+            mot = "Room to improve 📈"
+        else:
+            mot = "Let's do better next week 🎯"
+        ws_d = (now - timedelta(days=7)).strftime("%-d %b")
+        we_d = now.strftime("%-d %b")
+        txt = (
+            f"📊 <b>Weekly Report</b>\n{DIV}\n{ws_d} — {we_d}\n\n"
+            f"✅ Completed: {done}/{total} ({pct}%)\n"
+            f"❌ Missed: {missed}\n\n"
+            f"📅 Most Productive: {best_day}\n"
+            f"📉 Most Missed: {worst_day}\n\n"
+            f"{mot}"
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Detail", callback_data="wrdetail"), InlineKeyboardButton("＋ New", callback_data="add")]])
+        try:
+            await ctx.bot.send_message(chat_id=uid_int, text=txt, reply_markup=kb, parse_mode="HTML")
+            # Save to archive
+            save_weekly_archive(uid_int, week_start, week_end, done, missed, total, txt)
+        except Exception as e:
+            logger.error(f"[WEEKLY] {uid_s}: {e}")
+
+# ============= MONTHLY REPORT (NEW) =============
+async def check_monthly_report(ctx: ContextTypes.DEFAULT_TYPE):
+    """Run on 1st of each month at 10:00 AM"""
+    try:
+        cfg_rows = cfg_sheet.get_all_values()
+    except Exception:
+        return
+    
+    for r in cfg_rows[1:]:
+        tz_name = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        user_tz = safe_tz(tz_name)
+        now = datetime.now(user_tz)
+        
+        # Only run on 1st of month at 10:00
+        if now.day != 1 or now.strftime("%H:%M") != "10:00":
+            continue
+        
+        try:
+            uid_int = int(r[0])
+        except (ValueError, TypeError):
+            continue
+        
+        # Calculate previous month
+        last_month = now.replace(day=1) - timedelta(days=1)
+        year = last_month.year
+        month = last_month.month
+        
+        try:
+            rem_rows = sheet.get_all_values()
+        except Exception:
+            continue
+        
+        first_day = datetime(year, month, 1).strftime("%Y-%m-%d")
+        last_day = datetime(year, month, cal_module.monthrange(year, month)[1]).strftime("%Y-%m-%d")
+        
+        uid_s = str(r[0])
+        done = sum(1 for v in rem_rows[1:] if len(v) >= 6 and str(v[0]) == uid_s 
+                  and not (len(v) > 7 and str(v[7]).strip())
+                  and first_day <= norm_date(v[2]) <= last_day and str(v[5]).strip() == "done")
+        missed = sum(1 for v in rem_rows[1:] if len(v) >= 6 and str(v[0]) == uid_s 
+                    and not (len(v) > 7 and str(v[7]).strip())
+                    and first_day <= norm_date(v[2]) <= last_day and str(v[5]).strip() == "missed")
+        snoozed = sum(1 for v in rem_rows[1:] if len(v) >= 6 and str(v[0]) == uid_s 
+                     and not (len(v) > 7 and str(v[7]).strip())
+                     and first_day <= norm_date(v[2]) <= last_day and str(v[5]).strip() == "snoozed")
+        total = done + missed + snoozed
+        
+        if total == 0:
+            continue
+        
+        # Calculate stats
+        day_done, day_missed = {}, {}
+        for v in rem_rows[1:]:
+            if len(v) < 6 or str(v[0]) != uid_s or (len(v) > 7 and str(v[7]).strip()):
+                continue
+            ds = norm_date(str(v[2]).strip())
+            if first_day <= ds <= last_day:
+                st = str(v[5]).strip().lower()
+                try:
+                    wd = datetime.strptime(ds, "%Y-%m-%d").strftime("%A")
+                    if st == "done":
+                        day_done[wd] = day_done.get(wd, 0) + 1
+                    elif st == "missed":
+                        day_missed[wd] = day_missed.get(wd, 0) + 1
+                except Exception:
+                    pass
+        
+        best_day = max(day_done, key=day_done.get) if day_done else "—"
+        worst_day = max(day_missed, key=day_missed.get) if day_missed else "—"
+        
+        stats_json = json.dumps({"best_day": best_day, "worst_day": worst_day})
+        
+        # Save to archive
+        save_monthly_archive(uid_int, year, month, done, missed, snoozed, total, stats_json)
+        
+        logger.info(f"[MONTHLY] Saved report for user {uid_int}, {cal_module.month_name[month]} {year}")
+
+# ============= SCHEDULER =================
+async def check_reminders(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        cfg_vals = cfg_sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            cfg_vals = cfg_sheet.get_all_values()
+        except Exception:
+            cfg_vals = []
+    tz_map, cfg_map = {}, {}
+    for r in cfg_vals[1:]:
+        if not r:
+            continue
+        uid_s = str(r[0])
+        tz_map[uid_s] = str(r[5]) if len(r) > 5 and r[5] else DEF_TZ
+        cfg_map[uid_s] = {
+            "retry_gap": int(r[4]) if len(r) > 4 and r[4] else DEF_RETRY_GAP,
+            "max_retries": int(r[3]) if len(r) > 3 and r[3] else DEF_RETRIES,
+        }
+    try:
+        vals = sheet.get_all_values()
+    except Exception:
+        try:
+            client.login()
+            vals = sheet.get_all_values()
+        except Exception as e:
+            logger.error(f"[CRON] {e}")
+            return
+    for idx, v in enumerate(vals[1:], 2):
+        if len(v) < 7 or str(v[5]).strip().lower() != "active":
+            continue
+        uid_s = str(v[0])
+        user_tz = safe_tz(tz_map.get(uid_s, DEF_TZ))
+        now = datetime.now(user_tz)
+        if norm_date(str(v[2]).strip()) != now.strftime("%Y-%m-%d"):
+            continue
+        if norm_time(str(v[3]).strip()) != now.strftime("%H:%M"):
+            continue
+        rep = str(v[4]).strip() if len(v) > 4 else "none"
+        if not is_custom_day_match(rep, now):
+            continue
+        uid = int(v[0]) if v[0].isdigit() else v[0]
+        msg = str(v[1]).strip()
+        gid = str(v[7]).strip() if len(v) > 7 else ""
+        tid = str(v[8]).strip() if len(v) > 8 else ""
+        logger.info(f"[CRON] FIRE {idx}: '{msg[:30]}' uid={uid} gid={gid}")
+        if gid and tid:
+            await fire_group(ctx, idx, v, uid, msg, gid, tid, cfg_map.get(uid_s, {}))
+        else:
+            kill_jobs(ctx.job_queue, idx)
+            await rm_btns(ctx, idx)
+            if await send_and_track(ctx, uid, f"{msg}\n\n<b>⏰ Reminder</b>", act_kb(idx), f"r_{idx}", uid):
+                sheet.update_cell(idx, 6, "pending")
+                sheet.update_cell(idx, 7, 0)
+                gap = cfg_map.get(uid_s, {"retry_gap": DEF_RETRY_GAP})["retry_gap"]
+                ctx.job_queue.run_once(auto_retry, gap * 60, data={"row": idx, "chat": uid}, name=f"retry-{idx}")
+
+# ============= MAIN ======================
 def main():
     app = Application.builder().token(TOKEN).job_queue(JobQueue()).post_init(post_init).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add_cmd))
-    app.add_handler(CommandHandler("remind", remind_cmd))
-    app.add_handler(CommandHandler("settings", settings_cmd))
-    app.add_handler(CommandHandler("info", info_cmd))
-    # you can remove /list and /month commands or keep them pointing to schedule_view
-
+    for cmd, fn in [
+        ("start", start), 
+        ("add", add_cmd), 
+        ("schedule", schedule_cmd),
+        ("stats", stats_cmd),
+        ("list", list_cmd), 
+        ("month", month_cmd), 
+        ("remind", remind_cmd), 
+        ("settings", settings_cmd), 
+        ("info", info_cmd)
+    ]:
+        app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(on_btn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
     app.job_queue.run_repeating(check_reminders, interval=60, first=0)
     app.job_queue.run_repeating(check_digest, interval=60, first=10)
     app.job_queue.run_repeating(check_weekly_report, interval=60, first=20)
-
-    print("RemindX v2 — New Flow Active")
+    app.job_queue.run_repeating(check_monthly_report, interval=60, first=30)
+    print("🚀 RemindX Bot Running - Unified Schedule System Active")
     app.run_polling()
 
 if __name__ == "__main__":
