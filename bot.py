@@ -1360,7 +1360,7 @@ async def show_all_view(target, uid, ctx, new=False):
     else:
         await safe_edit(target, txt, InlineKeyboardMarkup(btns))
 
-async def show_history_hub(target, uid, ctx):
+async def show_history_hub(target, uid, ctx, new=False):
     utz = get_tz(uid)
     now = datetime.now(utz)
     
@@ -1420,7 +1420,12 @@ async def show_history_hub(target, uid, ctx):
         [InlineKeyboardButton("— Close", callback_data="stats_close")]
     ]
     
-    await safe_edit(target, txt, InlineKeyboardMarkup(btns))
+    show_cb = "stats_home"
+    if new:
+        sent = await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
+        schedule_minimize(ctx, sent, "<b>📈 Stats</b>", show_cb)
+    else:
+        await safe_edit(target, txt, InlineKeyboardMarkup(btns))
 
 async def show_digest_archive(target, uid, ctx):
     digests = get_digest_archive(uid, limit=30)
@@ -1710,7 +1715,7 @@ async def stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await rm_home(ctx, ctx.user_data)
     ctx.user_data.clear()
     update_username(update.effective_user.id, get_username(update.effective_user))
-    await show_history_hub(update.message, update.effective_user.id, ctx)
+    await show_history_hub(update.message, update.effective_user.id, ctx, new=True)
 
 async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Alias to schedule ALL view for backwards compatibility"""
